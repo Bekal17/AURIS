@@ -1,0 +1,22 @@
+{
+  "name": "auris-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@elevenlabs/elevenlabs-js": "^2.49.1",
+    "dotenv": "^17.4.2",
+    "elevenlabs": "^1.59.0",
+    "express": "^5.2.1",
+    "ws": "^8.20.1"
+  }
+}
