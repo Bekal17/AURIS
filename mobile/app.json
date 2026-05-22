@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "mobile",
+    "slug": "mobile",
+    "version": "1.0.0",
+    "extra": {
+      "eas": {
+        "projectId": "63af563a-f5e2-4300-a2cd-b7707856cbe2"
+      }
+    },
+    "owner": "bekal"
+  }
+}
