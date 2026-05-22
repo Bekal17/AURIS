@@ -1,7 +1,9 @@
 import express from 'express';
 import { createServer } from 'http';
 import Anthropic from '@anthropic-ai/sdk';
+import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import dotenv from 'dotenv';
+import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
 
 dotenv.config();
@@ -9,6 +11,19 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SYSTEM_PROMPT = 'You are AURIS, a hands-free voice assistant. You help drivers reply to messages, control phone volume, and read notifications. Be concise, max 2 sentences per response. Speak naturally.';
+const TRANSCRIBE_SYSTEM_PROMPT = `You are AURIS, a hands-free voice assistant for drivers and busy people.
+Help users reply to messages, read notifications, and control their phone.
+Be concise, max 2 sentences. Speak naturally in the same language as the user.`;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+  },
+});
+
+const elevenlabs = new ElevenLabsClient({
+  apiKey: process.env.ELEVENLABS_API_KEY,
+});
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -20,6 +35,72 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+function getTranscriptionText(transcription) {
+  if (typeof transcription?.text === 'string') {
+    return transcription.text.trim();
+  }
+
+  if (Array.isArray(transcription?.transcripts)) {
+    return transcription.transcripts
+      .map((item) => item.text)
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+
+  return '';
+}
+
+function getClaudeText(message) {
+  return message.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('')
+    .trim();
+}
+
+async function getClaudeResponse(transcript) {
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 256,
+    system: TRANSCRIBE_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: transcript }],
+  });
+
+  return getClaudeText(message);
+}
+
+app.post('/transcribe', upload.single('audio'), async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'Audio file is required.' });
+    return;
+  }
+
+  try {
+    const transcription = await elevenlabs.speechToText.convert({
+      file: {
+        data: req.file.buffer,
+        filename: req.file.originalname || 'auris-recording.m4a',
+        contentType: req.file.mimetype || 'audio/m4a',
+        contentLength: req.file.size,
+      },
+      modelId: 'scribe_v2',
+    });
+    const transcript = getTranscriptionText(transcription);
+
+    if (!transcript) {
+      res.status(422).json({ error: 'No transcript returned from audio.' });
+      return;
+    }
+
+    const response = await getClaudeResponse(transcript);
+    res.json({ transcript, response });
+  } catch (error) {
+    console.error('Transcription error:', error);
+    res.status(500).json({ error: 'Failed to transcribe audio.' });
+  }
 });
 
 const server = createServer(app);
