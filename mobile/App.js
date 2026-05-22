@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   Easing,
   Pressable,
@@ -11,7 +10,13 @@ import {
   Text,
   View,
 } from 'react-native';
-import { Audio } from 'expo-av';
+import {
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+  getRecordingPermissionsAsync,
+  requestRecordingPermissionsAsync,
+} from 'expo-audio';
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
 
@@ -60,10 +65,11 @@ function MicIcon({ color }) {
 }
 
 export default function App() {
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [assistantState, setAssistantState] = useState(ASSISTANT_STATE.IDLE);
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
-  const recordingRef = useRef(null);
+  const recordingActiveRef = useRef(false);
   const releaseRequestedRef = useRef(false);
   const speakingTimeoutRef = useRef(null);
   const pulseScale = useRef(new Animated.Value(1)).current;
@@ -124,8 +130,24 @@ export default function App() {
     }
   }
 
+  async function ensureAudioPermission() {
+    try {
+      const existingPermission = await getRecordingPermissionsAsync();
+
+      if (existingPermission.granted) {
+        return true;
+      }
+
+      const requestedPermission = await requestRecordingPermissionsAsync();
+      return requestedPermission.granted;
+    } catch (error) {
+      console.warn('expo-audio permission check failed:', error);
+      return false;
+    }
+  }
+
   async function startRecording() {
-    if (recordingRef.current || isBusy) {
+    if (recordingActiveRef.current || isBusy) {
       return;
     }
 
@@ -133,10 +155,11 @@ export default function App() {
       clearSpeakingTimer();
       releaseRequestedRef.current = false;
 
-      const permission = await Audio.requestPermissionsAsync();
+      const hasPermission = await ensureAudioPermission();
 
-      if (!permission.granted) {
-        Alert.alert('Microphone required', 'Please allow microphone access to use AURIS.');
+      if (!hasPermission) {
+        setResponse('Microphone permission is required to use AURIS.');
+        setAssistantState(ASSISTANT_STATE.IDLE);
         return;
       }
 
@@ -144,32 +167,29 @@ export default function App() {
       setResponse('');
       setAssistantState(ASSISTANT_STATE.LISTENING);
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
 
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-
-      recordingRef.current = newRecording;
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      recordingActiveRef.current = true;
 
       if (releaseRequestedRef.current) {
-        await stopRecording(newRecording);
+        await stopRecording();
       }
     } catch (error) {
       console.error('Failed to start recording:', error);
-      recordingRef.current = null;
+      recordingActiveRef.current = false;
+      releaseRequestedRef.current = false;
+      setResponse(`Recording error: ${error.message}`);
       setAssistantState(ASSISTANT_STATE.IDLE);
-      Alert.alert('Recording error', 'AURIS could not start listening.');
     }
   }
 
-  async function stopRecording(activeRecording = recordingRef.current) {
-    if (!activeRecording) {
+  async function stopRecording() {
+    if (!recordingActiveRef.current) {
       releaseRequestedRef.current = true;
       return;
     }
@@ -177,20 +197,23 @@ export default function App() {
     try {
       releaseRequestedRef.current = false;
       setAssistantState(ASSISTANT_STATE.THINKING);
-      await activeRecording.stopAndUnloadAsync();
-      const uri = activeRecording.getURI();
-      recordingRef.current = null;
+      await recorder.stop();
+      recordingActiveRef.current = false;
+      await setAudioModeAsync({ allowsRecording: false });
 
-      if (!uri) {
+      const recordingUri = recorder.uri || recorder.getStatus().url;
+
+      if (!recordingUri) {
         throw new Error('Recording URI was not available.');
       }
 
-      await sendAudioToServer(uri);
+      await sendAudioToServer(recordingUri);
     } catch (error) {
-      console.error('Failed to stop recording:', error);
-      recordingRef.current = null;
+      console.error('Failed to process recording:', error);
+      recordingActiveRef.current = false;
+      releaseRequestedRef.current = false;
+      setResponse(`Recording error: ${error.message}`);
       setAssistantState(ASSISTANT_STATE.IDLE);
-      Alert.alert('Recording error', 'AURIS could not process that recording.');
     }
   }
 
@@ -206,14 +229,22 @@ export default function App() {
       method: 'POST',
       body: formData,
     });
+    const rawResponse = await result.text();
+    let data = {};
 
-    if (!result.ok) {
-      throw new Error(`Server returned ${result.status}`);
+    try {
+      data = rawResponse ? JSON.parse(rawResponse) : {};
+    } catch {
+      data = { response: rawResponse };
     }
 
-    const data = await result.json();
+    if (!result.ok) {
+      throw new Error(data.error || data.response || `Server returned ${result.status}`);
+    }
+
     const nextTranscript = data.transcript || data.text || '';
-    const nextResponse = data.response || data.reply || data.answer || '';
+    const nextResponse =
+      data.response || data.reply || data.answer || rawResponse || 'No response returned.';
 
     setTranscript(nextTranscript || 'No transcript returned.');
     setResponse(nextResponse || 'No response returned.');

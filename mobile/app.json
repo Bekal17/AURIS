@@ -8,6 +8,22 @@
         "projectId": "63af563a-f5e2-4300-a2cd-b7707856cbe2"
       }
     },
+    "android": {
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow AURIS to access your microphone for voice commands."
+        }
+      ]
+    ],
     "owner": "bekal"
   }
 }

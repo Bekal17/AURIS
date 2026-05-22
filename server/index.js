@@ -29,6 +29,8 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+app.use(express.json());
+
 app.get('/', (req, res) => {
   res.json({ status: 'AURIS server running', port: PORT });
 });
@@ -73,12 +75,19 @@ async function getClaudeResponse(transcript) {
 }
 
 app.post('/transcribe', upload.single('audio'), async (req, res) => {
-  if (!req.file) {
-    res.status(400).json({ error: 'Audio file is required.' });
-    return;
-  }
-
   try {
+    if (req.body?.text) {
+      const transcript = String(req.body.text).trim();
+      const response = await getClaudeResponse(transcript);
+      res.json({ transcript, response });
+      return;
+    }
+
+    if (!req.file) {
+      res.status(400).json({ error: 'Audio file or text is required.' });
+      return;
+    }
+
     const transcription = await elevenlabs.speechToText.convert({
       file: {
         data: req.file.buffer,
