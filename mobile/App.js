@@ -1,38 +1,46 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
+  Alert,
   Animated,
   Easing,
-  Pressable,
+  DeviceEventEmitter,
+  NativeModules,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { createAudioPlayer } from 'expo-audio';
+import * as FileSystem from 'expo-file-system';
 import {
-  RecordingPresets,
-  setAudioModeAsync,
-  useAudioRecorder,
-  getRecordingPermissionsAsync,
-  requestRecordingPermissionsAsync,
-} from 'expo-audio';
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
+const WS_URL = 'wss://auris-production-a715.up.railway.app/ws';
+const { AurisModule } = NativeModules;
 
 const ASSISTANT_STATE = {
-  IDLE: 'IDLE',
+  WAKE: 'WAKE',
   LISTENING: 'LISTENING',
   THINKING: 'THINKING',
   SPEAKING: 'SPEAKING',
 };
 
+const LISTENING_MODE = {
+  WAKE: 'WAKE',
+  CONVERSATION: 'CONVERSATION',
+};
+
 const STATE_CONFIG = {
-  [ASSISTANT_STATE.IDLE]: {
+  [ASSISTANT_STATE.WAKE]: {
     color: '#ffffff',
-    label: 'Tap to activate',
-    status: '🎤 Ready',
-    pulsing: false,
+    label: "Say 'Auris' to activate",
+    status: "Listening for 'Auris'...",
+    pulsing: true,
   },
   [ASSISTANT_STATE.LISTENING]: {
     color: '#ff3b30',
@@ -54,31 +62,46 @@ const STATE_CONFIG = {
   },
 };
 
-function MicIcon({ color }) {
+function Waveform({ color }) {
   return (
-    <View style={styles.micIcon}>
-      <View style={[styles.micHead, { borderColor: color }]} />
-      <View style={[styles.micStem, { backgroundColor: color }]} />
-      <View style={[styles.micBase, { backgroundColor: color }]} />
+    <View style={styles.waveform}>
+      <View style={[styles.waveDot, styles.waveDotSmall, { backgroundColor: color }]} />
+      <View style={[styles.waveDot, styles.waveDotMedium, { backgroundColor: color }]} />
+      <View style={[styles.waveDot, styles.waveDotLarge, { backgroundColor: color }]} />
+      <View style={[styles.waveDot, styles.waveDotMedium, { backgroundColor: color }]} />
+      <View style={[styles.waveDot, styles.waveDotSmall, { backgroundColor: color }]} />
     </View>
   );
 }
 
 export default function App() {
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [assistantState, setAssistantState] = useState(ASSISTANT_STATE.IDLE);
+  const [assistantState, setAssistantState] = useState(ASSISTANT_STATE.WAKE);
+  const [statusText, setStatusText] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].status);
+  const [stateLabel, setStateLabel] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].label);
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
-  const recordingActiveRef = useRef(false);
-  const releaseRequestedRef = useRef(false);
+  const assistantStateRef = useRef(ASSISTANT_STATE.WAKE);
+  const audioPlayerRef = useRef(null);
+  const audioSubscriptionRef = useRef(null);
+  const audioFileRef = useRef(null);
+  const listeningModeRef = useRef(LISTENING_MODE.WAKE);
+  const voiceActiveRef = useRef(false);
+  const processingSpeechRef = useRef(false);
+  const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
+  const wsRef = useRef(null);
   const pulseScale = useRef(new Animated.Value(1)).current;
   const pulseOpacity = useRef(new Animated.Value(0.35)).current;
 
   const stateConfig = STATE_CONFIG[assistantState];
-  const isBusy =
-    assistantState === ASSISTANT_STATE.THINKING ||
-    assistantState === ASSISTANT_STATE.SPEAKING;
+
+  useSpeechRecognitionEvent('result', handleSpeechRecognitionResult);
+  useSpeechRecognitionEvent('end', restartCurrentListeningMode);
+  useSpeechRecognitionEvent('error', restartCurrentListeningMode);
+
+  useEffect(() => {
+    assistantStateRef.current = assistantState;
+  }, [assistantState]);
 
   useEffect(() => {
     if (!stateConfig.pulsing) {
@@ -123,6 +146,83 @@ export default function App() {
     return () => animation.stop();
   }, [pulseOpacity, pulseScale, stateConfig.pulsing]);
 
+  useEffect(() => {
+    async function startAlwaysOnListening() {
+      try {
+        AurisModule?.startForegroundService?.();
+      } catch (error) {
+        console.warn('Failed to start AURIS foreground service:', error);
+      }
+
+      await startWakeWordListening();
+    }
+
+    startAlwaysOnListening();
+
+    return () => {
+      clearReplyTimeout();
+      clearSpeakingTimer();
+      cleanupAudioPlayback();
+      closeWebSocket();
+      AurisModule?.stopForegroundService?.();
+      ExpoSpeechRecognitionModule.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    async function checkAccessibilityService() {
+      if (!AurisModule?.isAccessibilityEnabled) {
+        return;
+      }
+
+      try {
+        const enabled = await AurisModule.isAccessibilityEnabled();
+
+        if (!enabled) {
+          Alert.alert(
+            'Enable AURIS Accessibility',
+            'Turn on AURIS in Accessibility Settings so it can detect WhatsApp messages.',
+            [
+              { text: 'Not Now', style: 'cancel' },
+              {
+                text: 'Open Settings',
+                onPress: () => AurisModule.openAccessibilitySettings?.(),
+              },
+            ]
+          );
+        }
+      } catch (error) {
+        console.warn('Failed to check AURIS accessibility status:', error);
+      }
+    }
+
+    checkAccessibilityService();
+  }, []);
+
+  useEffect(() => {
+    const subscription = DeviceEventEmitter.addListener(
+      'onWhatsAppMessage',
+      async (message) => {
+        const rawMessage = String(message || '');
+        const separatorIndex = rawMessage.indexOf(':');
+        const sender =
+          separatorIndex >= 0 ? rawMessage.slice(0, separatorIndex).trim() : 'Unknown';
+        const text =
+          separatorIndex >= 0 ? rawMessage.slice(separatorIndex + 1).trim() : rawMessage;
+        const nextTranscript = `WhatsApp from ${sender}: ${text}`;
+
+        setTranscript(nextTranscript);
+        await stopVoiceListening();
+        await sendTextToServer(
+          `Read this WhatsApp notification aloud, then ask if I want to reply: ${nextTranscript}`,
+          () => startConversationListening()
+        );
+      }
+    );
+
+    return () => subscription.remove();
+  }, []);
+
   function clearSpeakingTimer() {
     if (speakingTimeoutRef.current) {
       clearTimeout(speakingTimeoutRef.current);
@@ -130,134 +230,331 @@ export default function App() {
     }
   }
 
-  async function ensureAudioPermission() {
+  function cleanupAudioPlayback() {
+    audioSubscriptionRef.current?.remove();
+    audioSubscriptionRef.current = null;
+
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.remove();
+      audioPlayerRef.current = null;
+    }
+
+    if (audioFileRef.current?.exists) {
+      audioFileRef.current.delete();
+      audioFileRef.current = null;
+    }
+  }
+
+  function clearReplyTimeout() {
+    if (replyTimeoutRef.current) {
+      clearTimeout(replyTimeoutRef.current);
+      replyTimeoutRef.current = null;
+    }
+  }
+
+  function scheduleReplyTimeout() {
+    clearReplyTimeout();
+    replyTimeoutRef.current = setTimeout(() => {
+      startWakeWordListening();
+    }, 5000);
+  }
+
+  function closeWebSocket() {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+  }
+
+  function connectWebSocket() {
+    if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    wsRef.current = new WebSocket(WS_URL);
+    wsRef.current.onmessage = (event) => {
+      if (typeof event.data !== 'string') {
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(event.data);
+
+        if (payload.type === 'transcript' && payload.transcript) {
+          setTranscript(payload.transcript);
+        }
+
+        if (payload.type === 'response' && payload.response) {
+          setResponse(payload.response);
+        }
+      } catch {
+        // Binary audio chunks are handled by native playback in future iterations.
+      }
+    };
+    wsRef.current.onerror = (error) => {
+      console.warn('AURIS WebSocket error:', error);
+    };
+  }
+
+  async function stopVoiceListening() {
     try {
-      const existingPermission = await getRecordingPermissionsAsync();
+      ExpoSpeechRecognitionModule.stop();
+    } catch (error) {
+      console.warn('Speech recognition stop failed:', error);
+    } finally {
+      voiceActiveRef.current = false;
+    }
+  }
+
+  async function startVoiceRecognition(mode) {
+    try {
+      await stopVoiceListening();
+      const hasPermission = await ensureSpeechRecognitionPermission();
+
+      if (!hasPermission) {
+        Alert.alert(
+          'Voice Recognition Required',
+          'AURIS needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+        );
+        return;
+      }
+
+      listeningModeRef.current = mode;
+      voiceActiveRef.current = true;
+      processingSpeechRef.current = false;
+      ExpoSpeechRecognitionModule.start({
+        lang: 'en-US',
+        interimResults: true,
+        continuous: true,
+        contextualStrings: ['Auris'],
+        androidIntentOptions: {
+          EXTRA_PARTIAL_RESULTS: true,
+          EXTRA_LANGUAGE_MODEL: 'free_form',
+        },
+      });
+    } catch (error) {
+      voiceActiveRef.current = false;
+      Alert.alert(
+        'Voice Recognition Required',
+        'AURIS needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+      );
+      console.warn('Speech recognition failed:', error);
+    }
+  }
+
+  async function ensureSpeechRecognitionPermission() {
+    try {
+      const existingPermission = await ExpoSpeechRecognitionModule.getPermissionsAsync();
 
       if (existingPermission.granted) {
         return true;
       }
 
-      const requestedPermission = await requestRecordingPermissionsAsync();
+      const requestedPermission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       return requestedPermission.granted;
     } catch (error) {
-      console.warn('expo-audio permission check failed:', error);
+      console.warn('Speech recognition permission check failed:', error);
       return false;
     }
   }
 
-  async function startRecording() {
-    if (recordingActiveRef.current || isBusy) {
+  async function startWakeWordListening() {
+    clearReplyTimeout();
+    setAssistantState(ASSISTANT_STATE.WAKE);
+    setStatusText("Listening for 'Auris'...");
+    setStateLabel("Say 'Auris' to activate");
+    await startVoiceRecognition(LISTENING_MODE.WAKE);
+  }
+
+  async function startConversationListening(nextStatus = 'Listening for reply...') {
+    clearReplyTimeout();
+    setAssistantState(ASSISTANT_STATE.LISTENING);
+    setStatusText(nextStatus);
+    setStateLabel('Listening...');
+    await startVoiceRecognition(LISTENING_MODE.CONVERSATION);
+    scheduleReplyTimeout();
+  }
+
+  function restartCurrentListeningMode() {
+    if (
+      assistantStateRef.current === ASSISTANT_STATE.SPEAKING ||
+      assistantStateRef.current === ASSISTANT_STATE.THINKING
+    ) {
       return;
     }
 
-    try {
-      clearSpeakingTimer();
-      releaseRequestedRef.current = false;
+    setTimeout(() => {
+      if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
+        startVoiceRecognition(LISTENING_MODE.CONVERSATION);
+      } else {
+        startVoiceRecognition(LISTENING_MODE.WAKE);
+      }
+    }, 250);
+  }
 
-      const hasPermission = await ensureAudioPermission();
+  function getRecognizedText(event) {
+    return event?.results?.map((result) => result.transcript).join(' ') || '';
+  }
 
-      if (!hasPermission) {
-        setResponse('Microphone permission is required to use AURIS.');
-        setAssistantState(ASSISTANT_STATE.IDLE);
+  async function handleSpeechRecognitionResult(event) {
+    const text = getRecognizedText(event);
+
+    if (!text) {
+      return;
+    }
+
+    if (listeningModeRef.current === LISTENING_MODE.WAKE && text.toLowerCase().includes('auris')) {
+      await activateAuris();
+      return;
+    }
+
+    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
+      scheduleReplyTimeout();
+
+      if (!event.isFinal || processingSpeechRef.current) {
         return;
       }
 
-      setTranscript('');
-      setResponse('');
-      setAssistantState(ASSISTANT_STATE.LISTENING);
-
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-      });
-
-      await recorder.prepareToRecordAsync();
-      recorder.record();
-      recordingActiveRef.current = true;
-
-      if (releaseRequestedRef.current) {
-        await stopRecording();
-      }
-    } catch (error) {
-      console.error('Failed to start recording:', error);
-      recordingActiveRef.current = false;
-      releaseRequestedRef.current = false;
-      setResponse(`Recording error: ${error.message}`);
-      setAssistantState(ASSISTANT_STATE.IDLE);
+      processingSpeechRef.current = true;
+      clearReplyTimeout();
+      await stopVoiceListening();
+      setTranscript(text.trim());
+      await sendTextToServer(text.trim(), () => startConversationListening());
     }
   }
 
-  async function stopRecording() {
-    if (!recordingActiveRef.current) {
-      releaseRequestedRef.current = true;
+  async function activateAuris() {
+    if (processingSpeechRef.current) {
       return;
     }
 
+    processingSpeechRef.current = true;
+    await stopVoiceListening();
+    connectWebSocket();
+    setTranscript("Wake word detected: Auris");
+    setResponse('Yes?');
+    setAssistantState(ASSISTANT_STATE.SPEAKING);
+    setStatusText('Speaking...');
+    setStateLabel('Speaking...');
+    setTimeout(() => {
+      processingSpeechRef.current = false;
+      startConversationListening('AURIS Active - Speak now');
+    }, 700);
+  }
+
+  async function sendTextToServer(text, afterSpeech) {
     try {
-      releaseRequestedRef.current = false;
+      clearSpeakingTimer();
+      setResponse('');
       setAssistantState(ASSISTANT_STATE.THINKING);
-      await recorder.stop();
-      recordingActiveRef.current = false;
-      await setAudioModeAsync({ allowsRecording: false });
 
-      const recordingUri = recorder.uri || recorder.getStatus().url;
+      const result = await fetch(`${SERVER_URL}/transcribe`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text }),
+      });
+      const rawResponse = await result.text();
+      let data = {};
 
-      if (!recordingUri) {
-        throw new Error('Recording URI was not available.');
+      try {
+        data = rawResponse ? JSON.parse(rawResponse) : {};
+      } catch {
+        data = { response: rawResponse };
       }
 
-      await sendAudioToServer(recordingUri);
+      if (!result.ok) {
+        throw new Error(data.error || data.response || `Server returned ${result.status}`);
+      }
+
+      const nextResponse =
+        data.response || data.reply || data.answer || rawResponse || 'No response returned.';
+
+      setResponse(nextResponse);
+      await playResponseAudioOrSchedule(data.audio, nextResponse, afterSpeech);
     } catch (error) {
-      console.error('Failed to process recording:', error);
-      recordingActiveRef.current = false;
-      releaseRequestedRef.current = false;
-      setResponse(`Recording error: ${error.message}`);
-      setAssistantState(ASSISTANT_STATE.IDLE);
+      console.error('Failed to process WhatsApp message:', error);
+      setResponse(`Server error: ${error.message}`);
+      processingSpeechRef.current = false;
+      await startWakeWordListening();
     }
   }
 
-  async function sendAudioToServer(uri) {
-    const formData = new FormData();
-    formData.append('audio', {
-      uri,
-      name: 'auris-recording.m4a',
-      type: 'audio/m4a',
-    });
-
-    const result = await fetch(`${SERVER_URL}/transcribe`, {
-      method: 'POST',
-      body: formData,
-    });
-    const rawResponse = await result.text();
-    let data = {};
-
-    try {
-      data = rawResponse ? JSON.parse(rawResponse) : {};
-    } catch {
-      data = { response: rawResponse };
+  async function playResponseAudioOrSchedule(audio, nextResponse, afterSpeech) {
+    if (audio) {
+      try {
+        await playAudioResponse(audio, afterSpeech);
+        return;
+      } catch (error) {
+        console.error('Failed to play response audio:', error);
+      }
     }
 
-    if (!result.ok) {
-      throw new Error(data.error || data.response || `Server returned ${result.status}`);
-    }
-
-    const nextTranscript = data.transcript || data.text || '';
-    const nextResponse =
-      data.response || data.reply || data.answer || rawResponse || 'No response returned.';
-
-    setTranscript(nextTranscript || 'No transcript returned.');
-    setResponse(nextResponse || 'No response returned.');
     setAssistantState(ASSISTANT_STATE.SPEAKING);
+    scheduleIdleState(nextResponse, afterSpeech);
+  }
 
+  async function playAudioResponse(base64Audio, afterSpeech) {
+    clearSpeakingTimer();
+    cleanupAudioPlayback();
+
+    const audioFile = new FileSystem.File(
+      FileSystem.Paths.cache,
+      `auris-response-${Date.now()}.mp3`
+    );
+    audioFile.create({ overwrite: true });
+    audioFile.write(base64Audio, { encoding: FileSystem.EncodingType.Base64 });
+    audioFileRef.current = audioFile;
+
+    const player = createAudioPlayer(audioFile.uri);
+    audioPlayerRef.current = player;
+    setAssistantState(ASSISTANT_STATE.SPEAKING);
+    setStatusText('Speaking...');
+    setStateLabel('Speaking...');
+
+    audioSubscriptionRef.current = player.addListener('playbackStatusUpdate', (status) => {
+      if (status.error) {
+        console.error('AURIS audio playback error:', status.error);
+        cleanupAudioPlayback();
+        processingSpeechRef.current = false;
+        if (afterSpeech) {
+          afterSpeech();
+        } else {
+          startWakeWordListening();
+        }
+        return;
+      }
+
+      if (status.didJustFinish) {
+        cleanupAudioPlayback();
+        processingSpeechRef.current = false;
+        if (afterSpeech) {
+          afterSpeech();
+        } else {
+          startWakeWordListening();
+        }
+      }
+    });
+
+    player.play();
+  }
+
+  function scheduleIdleState(nextResponse, afterSpeech) {
+    clearSpeakingTimer();
     const speakingDuration = Math.min(
       4500,
       Math.max(1600, (nextResponse || '').length * 45)
     );
 
     speakingTimeoutRef.current = setTimeout(() => {
-      setAssistantState(ASSISTANT_STATE.IDLE);
+      processingSpeechRef.current = false;
       speakingTimeoutRef.current = null;
+      if (afterSpeech) {
+        afterSpeech();
+      } else {
+        startWakeWordListening();
+      }
     }, speakingDuration);
   }
 
@@ -265,69 +562,61 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#0a0a0a" />
 
-      <View style={styles.header}>
-        <Text style={styles.appName}>AURIS</Text>
-        <Text style={styles.tagline}>Hands-free AI Assistant</Text>
-      </View>
-
-      <View style={styles.centerStage}>
-        <View style={styles.micWrap}>
-          {stateConfig.pulsing ? (
-            <Animated.View
-              style={[
-                styles.pulseCircle,
-                {
-                  backgroundColor: stateConfig.color,
-                  opacity: pulseOpacity,
-                  transform: [{ scale: pulseScale }],
-                },
-              ]}
-            />
-          ) : null}
-
-          <Pressable
-            onPressIn={startRecording}
-            onPressOut={stopRecording}
-            disabled={isBusy}
-            style={({ pressed }) => [
-              styles.micButton,
-              { borderColor: stateConfig.color },
-              pressed && !isBusy ? styles.micButtonPressed : null,
-            ]}
-          >
-            {assistantState === ASSISTANT_STATE.THINKING ? (
-              <ActivityIndicator color={stateConfig.color} size="large" />
-            ) : (
-              <MicIcon color={stateConfig.color} />
-            )}
-          </Pressable>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <Text style={styles.appName}>AURIS</Text>
+          <Text style={styles.tagline}>Hands-free AI Assistant</Text>
         </View>
 
-        <Text style={[styles.stateLabel, { color: stateConfig.color }]}>
-          {stateConfig.label}
-        </Text>
-      </View>
+        <View style={styles.centerStage}>
+          <View style={styles.waveWrap}>
+            {stateConfig.pulsing ? (
+              <Animated.View
+                style={[
+                  styles.pulseCircle,
+                  {
+                    backgroundColor: stateConfig.color,
+                    opacity: pulseOpacity,
+                    transform: [{ scale: pulseScale }],
+                  },
+                ]}
+              />
+            ) : null}
 
-      <View style={styles.content}>
-        <View style={styles.transcriptBox}>
-          <Text style={styles.boxTitle}>You said</Text>
-          <Text style={styles.boxText}>
-            {transcript || 'Your transcript will appear here.'}
+            <View style={[styles.waveCard, { borderColor: stateConfig.color }]}>
+              <Waveform color={stateConfig.color} />
+            </View>
+          </View>
+
+          <Text style={[styles.stateLabel, { color: stateConfig.color }]}>
+            {stateLabel}
           </Text>
         </View>
 
-        <View style={styles.responseBox}>
-          <Text style={styles.boxTitle}>AURIS response</Text>
-          <Text style={styles.boxText}>
-            {response || 'AURIS will respond here.'}
-          </Text>
-        </View>
-      </View>
+        <View style={styles.content}>
+          <View style={styles.transcriptBox}>
+            <Text style={styles.boxTitle}>You said</Text>
+            <Text style={styles.boxText}>
+              {transcript || 'Your transcript will appear here.'}
+            </Text>
+          </View>
 
-      <View style={styles.bottomStatus}>
-        <View style={[styles.statusDot, { backgroundColor: stateConfig.color }]} />
-        <Text style={styles.statusText}>{stateConfig.status}</Text>
-      </View>
+          <View style={styles.responseBox}>
+            <Text style={styles.boxTitle}>AURIS response</Text>
+            <Text style={styles.boxText}>
+              {response || 'AURIS will respond here.'}
+            </Text>
+          </View>
+
+          <View style={styles.bottomStatus}>
+            <View style={[styles.statusDot, { backgroundColor: stateConfig.color }]} />
+            <Text style={styles.statusText}>{statusText}</Text>
+          </View>
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -336,6 +625,9 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0a0a0a',
+  },
+  scrollContent: {
+    flexGrow: 1,
     paddingHorizontal: 24,
   },
   header: {
@@ -358,7 +650,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 70,
   },
-  micWrap: {
+  waveWrap: {
     alignItems: 'center',
     height: 148,
     justifyContent: 'center',
@@ -370,7 +662,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     width: 148,
   },
-  micButton: {
+  waveCard: {
     alignItems: 'center',
     backgroundColor: '#111118',
     borderRadius: 60,
@@ -383,31 +675,27 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     width: 120,
   },
-  micButtonPressed: {
-    transform: [{ scale: 0.96 }],
-  },
-  micIcon: {
+  waveform: {
     alignItems: 'center',
-    height: 62,
-    justifyContent: 'flex-end',
-    width: 46,
+    flexDirection: 'row',
+    gap: 7,
+    height: 72,
+    justifyContent: 'center',
+    width: 82,
   },
-  micHead: {
-    borderRadius: 17,
-    borderWidth: 4,
-    height: 38,
-    width: 26,
+  waveDot: {
+    borderRadius: 999,
+    opacity: 0.9,
+    width: 8,
   },
-  micStem: {
-    borderRadius: 2,
-    height: 16,
-    marginTop: 2,
-    width: 4,
+  waveDotSmall: {
+    height: 26,
   },
-  micBase: {
-    borderRadius: 2,
-    height: 4,
-    width: 28,
+  waveDotMedium: {
+    height: 44,
+  },
+  waveDotLarge: {
+    height: 64,
   },
   stateLabel: {
     fontSize: 18,
@@ -415,9 +703,8 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   content: {
-    flex: 1,
     gap: 16,
-    justifyContent: 'center',
+    marginTop: 44,
   },
   transcriptBox: {
     backgroundColor: '#24242a',
@@ -457,7 +744,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flexDirection: 'row',
     gap: 10,
-    marginBottom: 24,
+    marginBottom: 40,
     paddingHorizontal: 18,
     paddingVertical: 12,
   },

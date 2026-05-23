@@ -1,8 +1,9 @@
-package com.mobile
+package com.bekal.mobile
 
 import android.app.Application
 import android.content.res.Configuration
 
+import com.bekal.mobile.AurisPackage
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
@@ -23,6 +24,7 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           // Packages that cannot be autolinked yet can be added manually here, for example:
           // add(MyReactNativePackage())
+          add(AurisPackage())
         }
     )
   }
