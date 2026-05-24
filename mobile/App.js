@@ -8,7 +8,6 @@ import {
   Image,
   NativeModules,
   PermissionsAndroid,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -20,7 +19,32 @@ import * as FileSystem from 'expo-file-system';
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
 const WS_URL = 'wss://auris-production-a715.up.railway.app/ws';
-const { AurisModule, AurisPhoneModule, AurelSpeechModule } = NativeModules;
+
+function hasNativeMethod(moduleName, methodName) {
+  const nativeModule = NativeModules[moduleName];
+
+  if (!nativeModule) {
+    console.error(`${moduleName} not found!`);
+    return false;
+  }
+
+  if (typeof nativeModule[methodName] !== 'function') {
+    console.error(`${moduleName}.${methodName} not found!`);
+    return false;
+  }
+
+  return true;
+}
+
+function callNativeModule(moduleName, methodName, ...args) {
+  console.log(`Calling ${moduleName}.${methodName}`);
+
+  if (!hasNativeMethod(moduleName, methodName)) {
+    return undefined;
+  }
+
+  return NativeModules[moduleName][methodName](...args);
+}
 
 const ASSISTANT_STATE = {
   WAKE: 'WAKE',
@@ -77,6 +101,8 @@ function Waveform({ color }) {
 }
 
 export default function App() {
+  console.log('Aurel App: component mounted');
+
   const [assistantState, setAssistantState] = useState(ASSISTANT_STATE.WAKE);
   const [statusText, setStatusText] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].status);
   const [stateLabel, setStateLabel] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].label);
@@ -106,153 +132,176 @@ export default function App() {
   const stateConfig = STATE_CONFIG[assistantState];
 
   useEffect(() => {
-    assistantStateRef.current = assistantState;
+    try {
+      assistantStateRef.current = assistantState;
+    } catch (e) {
+      console.error('useEffect error:', e.message);
+    }
   }, [assistantState]);
 
   useEffect(() => {
-    if (!stateConfig.pulsing) {
-      pulseScale.setValue(1);
-      pulseOpacity.setValue(0.35);
+    try {
+      if (!stateConfig.pulsing) {
+        pulseScale.setValue(1);
+        pulseOpacity.setValue(0.35);
+        return undefined;
+      }
+
+      const animation = Animated.loop(
+        Animated.parallel([
+          Animated.sequence([
+            Animated.timing(pulseScale, {
+              toValue: 1.28,
+              duration: 850,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(pulseScale, {
+              toValue: 1,
+              duration: 850,
+              easing: Easing.in(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(pulseOpacity, {
+              toValue: 0.08,
+              duration: 850,
+              useNativeDriver: true,
+            }),
+            Animated.timing(pulseOpacity, {
+              toValue: 0.35,
+              duration: 850,
+              useNativeDriver: true,
+            }),
+          ]),
+        ])
+      );
+
+      animation.start();
+
+      return () => animation.stop();
+    } catch (e) {
+      console.error('useEffect error:', e.message);
       return undefined;
     }
-
-    const animation = Animated.loop(
-      Animated.parallel([
-        Animated.sequence([
-          Animated.timing(pulseScale, {
-            toValue: 1.28,
-            duration: 850,
-            easing: Easing.out(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseScale, {
-            toValue: 1,
-            duration: 850,
-            easing: Easing.in(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ]),
-        Animated.sequence([
-          Animated.timing(pulseOpacity, {
-            toValue: 0.08,
-            duration: 850,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseOpacity, {
-            toValue: 0.35,
-            duration: 850,
-            useNativeDriver: true,
-          }),
-        ]),
-      ])
-    );
-
-    animation.start();
-
-    return () => animation.stop();
   }, [pulseOpacity, pulseScale, stateConfig.pulsing]);
 
   useEffect(() => {
-    runStartupPermissionFlow();
-    const appStateSubscription = AppState.addEventListener('change', (nextState) => {
-      if (nextState === 'active') {
-        runStartupPermissionFlow();
-      }
-    });
+    try {
+      runStartupPermissionFlow();
+      const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+        if (nextState === 'active') {
+          runStartupPermissionFlow();
+        }
+      });
 
-    return () => {
-      appStateSubscription.remove();
-      clearReplyTimeout();
-      clearSpeechRestartTimeout();
-      clearSpeakingTimer();
-      cleanupAudioPlayback();
-      closeWebSocket();
-      AurisModule?.stopForegroundService?.();
-      AurelSpeechModule?.destroyRecognizer?.();
-    };
+      return () => {
+        appStateSubscription.remove();
+        clearReplyTimeout();
+        clearSpeechRestartTimeout();
+        clearSpeakingTimer();
+        cleanupAudioPlayback();
+        closeWebSocket();
+        callNativeModule('AurisModule', 'stopForegroundService');
+        callNativeModule('AurelSpeechModule', 'destroyRecognizer');
+      };
+    } catch (e) {
+      console.error('useEffect error:', e.message);
+      return undefined;
+    }
   }, []);
 
   useEffect(() => {
-    const whatsAppSubscription = DeviceEventEmitter.addListener(
-      'onWhatsAppMessage',
-      async (message) => {
-        const rawMessage = String(message || '');
-        const separatorIndex = rawMessage.indexOf(':');
-        const sender =
-          separatorIndex >= 0 ? rawMessage.slice(0, separatorIndex).trim() : 'Unknown';
-        const text =
-          separatorIndex >= 0 ? rawMessage.slice(separatorIndex + 1).trim() : rawMessage;
-        const nextTranscript = `WhatsApp dari ${sender}: ${text}`;
+    try {
+      const whatsAppSubscription = DeviceEventEmitter.addListener(
+        'onWhatsAppMessage',
+        async (message) => {
+          const rawMessage = String(message || '');
+          const separatorIndex = rawMessage.indexOf(':');
+          const sender =
+            separatorIndex >= 0 ? rawMessage.slice(0, separatorIndex).trim() : 'Unknown';
+          const text =
+            separatorIndex >= 0 ? rawMessage.slice(separatorIndex + 1).trim() : rawMessage;
+          const nextTranscript = `WhatsApp dari ${sender}: ${text}`;
 
-        pendingWhatsAppReplyRef.current = {
-          sender,
-          message: text,
-          awaitingReplyText: false,
-        };
-        setTranscript(nextTranscript);
-        await stopVoiceListening();
-        await sendTextToServer(
-          `Ada pesan WhatsApp dari ${sender}: ${text}. Bacakan dan tanya apakah mau dibalas`,
-          () => startConversationListening('Mendengarkan perintah balasan WhatsApp...')
-        );
-      }
-    );
-    const incomingCallSubscription = DeviceEventEmitter.addListener(
-      'onIncomingCall',
-      async (caller) => {
-        await handleIncomingCall(caller);
-      }
-    );
-    const whatsAppCallSubscription = DeviceEventEmitter.addListener(
-      'onWhatsAppCall',
-      async (title) => {
-        await handleWhatsAppCall(title);
-      }
-    );
-    const audioDeviceSubscription = DeviceEventEmitter.addListener(
-      'onAudioDeviceChanged',
-      async (device) => {
-        await handleAudioDeviceChanged(device);
-      }
-    );
-    const restartListeningSubscription = DeviceEventEmitter.addListener(
-      'onRestartListening',
-      () => {
-        restartRecognition();
-      }
-    );
-    const speechPartialSubscription = DeviceEventEmitter.addListener(
-      'onSpeechPartial',
-      handleSpeechPartial
-    );
-    const speechResultSubscription = DeviceEventEmitter.addListener(
-      'onSpeechResult',
-      handleSpeechResult
-    );
-    const speechEndSubscription = DeviceEventEmitter.addListener(
-      'onSpeechEnd',
-      handleRecognitionEnd
-    );
-    const speechErrorSubscription = DeviceEventEmitter.addListener(
-      'onSpeechError',
-      handleRecognitionError
-    );
+          pendingWhatsAppReplyRef.current = {
+            sender,
+            message: text,
+            awaitingReplyText: false,
+          };
+          setTranscript(nextTranscript);
+          await stopVoiceListening();
+          await sendTextToServer(
+            `Ada pesan WhatsApp dari ${sender}: ${text}. Bacakan dan tanya apakah mau dibalas`,
+            () => startConversationListening('Mendengarkan perintah balasan WhatsApp...')
+          );
+        }
+      );
+      const incomingCallSubscription = DeviceEventEmitter.addListener(
+        'onIncomingCall',
+        async (caller) => {
+          await handleIncomingCall(caller);
+        }
+      );
+      const whatsAppCallSubscription = DeviceEventEmitter.addListener(
+        'onWhatsAppCall',
+        async (title) => {
+          await handleWhatsAppCall(title);
+        }
+      );
+      const audioDeviceSubscription = DeviceEventEmitter.addListener(
+        'onAudioDeviceChanged',
+        async (device) => {
+          await handleAudioDeviceChanged(device);
+        }
+      );
+      const restartListeningSubscription = DeviceEventEmitter.addListener(
+        'onRestartListening',
+        () => {
+          restartRecognition();
+        }
+      );
+      const speechPartialSubscription = DeviceEventEmitter.addListener(
+        'onSpeechPartial',
+        handleSpeechPartial
+      );
+      const speechResultSubscription = DeviceEventEmitter.addListener(
+        'onSpeechResult',
+        handleSpeechResult
+      );
+      const speechEndSubscription = DeviceEventEmitter.addListener(
+        'onSpeechEnd',
+        handleRecognitionEnd
+      );
+      const speechErrorSubscription = DeviceEventEmitter.addListener(
+        'onSpeechError',
+        handleRecognitionError
+      );
 
-    return () => {
-      whatsAppSubscription.remove();
-      incomingCallSubscription.remove();
-      whatsAppCallSubscription.remove();
-      audioDeviceSubscription.remove();
-      restartListeningSubscription.remove();
-      speechPartialSubscription.remove();
-      speechResultSubscription.remove();
-      speechEndSubscription.remove();
-      speechErrorSubscription.remove();
-    };
+      return () => {
+        whatsAppSubscription.remove();
+        incomingCallSubscription.remove();
+        whatsAppCallSubscription.remove();
+        audioDeviceSubscription.remove();
+        restartListeningSubscription.remove();
+        speechPartialSubscription.remove();
+        speechResultSubscription.remove();
+        speechEndSubscription.remove();
+        speechErrorSubscription.remove();
+      };
+    } catch (e) {
+      console.error('useEffect error:', e.message);
+      return undefined;
+    }
   }, []);
 
   useEffect(() => {
-    initializeAudioOutputDevice();
+    try {
+      initializeAudioOutputDevice();
+    } catch (e) {
+      console.error('useEffect error:', e.message);
+    }
   }, []);
 
   function clearSpeakingTimer() {
@@ -307,7 +356,7 @@ export default function App() {
 
   function updateNotificationState(state) {
     try {
-      AurisModule?.updateNotificationState?.(state);
+      callNativeModule('AurisModule', 'updateNotificationState', state);
     } catch (error) {
       console.warn('Failed to update Aurel notification state:', error);
     }
@@ -332,9 +381,9 @@ export default function App() {
 
     try {
       if (nextDevice.includes('bluetooth')) {
-        await AurisPhoneModule?.setAudioToBluetoothHeadset?.();
+        await callNativeModule('AurisPhoneModule', 'setAudioToBluetoothHeadset');
       } else {
-        await AurisPhoneModule?.setAudioToSpeaker?.();
+        await callNativeModule('AurisPhoneModule', 'setAudioToSpeaker');
       }
     } catch (error) {
       console.warn('Failed to route Aurel audio:', error);
@@ -343,7 +392,7 @@ export default function App() {
 
   async function initializeAudioOutputDevice() {
     try {
-      const device = await AurisPhoneModule?.getAudioOutputDevice?.();
+      const device = await callNativeModule('AurisPhoneModule', 'getAudioOutputDevice');
 
       if (device) {
         await routeAudioForDevice(device);
@@ -384,7 +433,7 @@ export default function App() {
       }
 
       try {
-        AurisModule?.startForegroundService?.();
+        callNativeModule('AurisModule', 'startForegroundService');
       } catch (error) {
         console.warn('Failed to start Aurel background services:', error);
       }
@@ -418,12 +467,12 @@ export default function App() {
   }
 
   async function ensureAccessibilityPermission() {
-    if (!AurisModule?.isAccessibilityEnabled) {
+    if (!hasNativeMethod('AurisModule', 'isAccessibilityEnabled')) {
       return true;
     }
 
     try {
-      const enabled = await AurisModule.isAccessibilityEnabled();
+      const enabled = await callNativeModule('AurisModule', 'isAccessibilityEnabled');
 
       if (enabled) {
         return true;
@@ -435,7 +484,7 @@ export default function App() {
         [
           {
             text: 'Open Settings',
-            onPress: () => AurisModule.openAccessibilitySettings?.(),
+            onPress: () => callNativeModule('AurisModule', 'openAccessibilitySettings'),
           },
         ],
         { cancelable: false }
@@ -448,12 +497,12 @@ export default function App() {
   }
 
   async function ensureBatteryOptimizationExemption() {
-    if (!AurisModule?.isBatteryOptimizationExempted) {
+    if (!hasNativeMethod('AurisModule', 'isBatteryOptimizationExempted')) {
       return true;
     }
 
     try {
-      const exempted = await AurisModule.isBatteryOptimizationExempted();
+      const exempted = await callNativeModule('AurisModule', 'isBatteryOptimizationExempted');
 
       if (exempted) {
         return true;
@@ -465,7 +514,7 @@ export default function App() {
         [
           {
             text: 'Izinkan Sekarang',
-            onPress: () => AurisModule.requestBatteryOptimizationExemption?.(),
+            onPress: () => callNativeModule('AurisModule', 'requestBatteryOptimizationExemption'),
           },
           {
             text: 'Pelajari Lebih Lanjut',
@@ -487,7 +536,7 @@ export default function App() {
       [
         {
           text: 'Izinkan Sekarang',
-          onPress: () => AurisModule?.requestBatteryOptimizationExemption?.(),
+          onPress: () => callNativeModule('AurisModule', 'requestBatteryOptimizationExemption'),
         },
         {
           text: 'Kembali',
@@ -534,7 +583,7 @@ export default function App() {
   async function stopVoiceListening() {
     try {
       manualSpeechStopRef.current = true;
-      await AurelSpeechModule?.stopListening?.();
+      await callNativeModule('AurelSpeechModule', 'stopListening');
     } catch (error) {
       console.warn('Speech recognition stop failed:', error);
     } finally {
@@ -559,7 +608,7 @@ export default function App() {
         return;
       }
 
-      if (!AurelSpeechModule?.startListening) {
+      if (!hasNativeMethod('AurelSpeechModule', 'startListening')) {
         Alert.alert(
           'Voice Recognition Required',
           'Aurel native speech recognition is not available in this build.'
@@ -570,7 +619,7 @@ export default function App() {
       listeningModeRef.current = mode;
       voiceActiveRef.current = true;
       processingSpeechRef.current = false;
-      await AurelSpeechModule?.startListening?.('id-ID');
+      await callNativeModule('AurelSpeechModule', 'startListening', 'id-ID');
     } catch (error) {
       voiceActiveRef.current = false;
       Alert.alert(
@@ -772,7 +821,7 @@ export default function App() {
 
   async function sendWhatsAppReply(replyText) {
     try {
-      await AurisModule?.replyToWhatsApp?.(replyText);
+      await callNativeModule('AurisModule', 'replyToWhatsApp', replyText);
       pendingWhatsAppReplyRef.current = null;
       setTranscript(`Balas WhatsApp: ${replyText}`);
       setResponse('Pesan WhatsApp dikirim.');
@@ -799,7 +848,7 @@ export default function App() {
       }
 
       if (command.includes('tolak') || command.includes('jangan') || command.includes('reject')) {
-        await AurisPhoneModule?.rejectWhatsAppCall?.();
+        await callNativeModule('AurisPhoneModule', 'rejectWhatsAppCall');
         pendingWhatsAppCallRef.current = null;
         setResponse('Panggilan WhatsApp ditolak.');
         await startWakeWordListening();
@@ -811,8 +860,8 @@ export default function App() {
         (command.includes('angkat') && command.includes('speaker')) ||
         command.includes('speaker')
       ) {
-        await AurisPhoneModule?.answerWhatsAppCall?.();
-        await AurisPhoneModule?.setSpeakerOn?.(true);
+        await callNativeModule('AurisPhoneModule', 'answerWhatsAppCall');
+        await callNativeModule('AurisPhoneModule', 'setSpeakerOn', true);
         pendingWhatsAppCallRef.current = null;
         setResponse('Panggilan WhatsApp diangkat dengan loudspeaker.');
         await startConversationListening();
@@ -820,7 +869,7 @@ export default function App() {
       }
 
       if (command.includes('angkat')) {
-        await AurisPhoneModule?.answerWhatsAppCall?.();
+        await callNativeModule('AurisPhoneModule', 'answerWhatsAppCall');
         pendingWhatsAppCallRef.current = null;
         setResponse('Panggilan WhatsApp diangkat.');
         await startConversationListening();
@@ -859,7 +908,7 @@ export default function App() {
     }
 
     try {
-      await AurisPhoneModule?.setVolume?.(direction);
+      await callNativeModule('AurisPhoneModule', 'setVolume', direction);
       setResponse('Volume disesuaikan.');
       await startConversationListening();
     } catch (error) {
@@ -875,8 +924,8 @@ export default function App() {
 
     try {
       if (command.includes('angkat') && command.includes('loudspeaker')) {
-        await AurisPhoneModule?.answerCall?.();
-        await AurisPhoneModule?.setSpeakerOn?.(true);
+        await callNativeModule('AurisPhoneModule', 'answerCall');
+        await callNativeModule('AurisPhoneModule', 'setSpeakerOn', true);
         pendingIncomingCallRef.current = null;
         setResponse('Panggilan diangkat dengan loudspeaker.');
         await startConversationListening();
@@ -884,7 +933,7 @@ export default function App() {
       }
 
       if (command.includes('angkat')) {
-        await AurisPhoneModule?.answerCall?.();
+        await callNativeModule('AurisPhoneModule', 'answerCall');
         pendingIncomingCallRef.current = null;
         setResponse('Panggilan diangkat.');
         await startConversationListening();
@@ -892,7 +941,7 @@ export default function App() {
       }
 
       if (command.includes('tolak')) {
-        await AurisPhoneModule?.rejectCall?.();
+        await callNativeModule('AurisPhoneModule', 'rejectCall');
         pendingIncomingCallRef.current = null;
         setResponse('Panggilan ditolak.');
         await startWakeWordListening();
@@ -900,21 +949,21 @@ export default function App() {
       }
 
       if (command.includes('unmute') || command.includes('aktifkan mic')) {
-        await AurisPhoneModule?.setMute?.(false);
+        await callNativeModule('AurisPhoneModule', 'setMute', false);
         setResponse('Mikrofon diaktifkan.');
         await startConversationListening();
         return true;
       }
 
       if (command.includes('mute') || command.includes('bisukan')) {
-        await AurisPhoneModule?.setMute?.(true);
+        await callNativeModule('AurisPhoneModule', 'setMute', true);
         setResponse('Mikrofon dimute.');
         await startConversationListening();
         return true;
       }
 
       if (command.includes('loudspeaker')) {
-        await AurisPhoneModule?.setSpeakerOn?.(true);
+        await callNativeModule('AurisPhoneModule', 'setSpeakerOn', true);
         setResponse('Loudspeaker dinyalakan.');
         await startConversationListening();
         return true;
@@ -1181,7 +1230,7 @@ export default function App() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor={AUREL_GREEN} />
 
       <ScrollView
@@ -1239,7 +1288,7 @@ export default function App() {
           </View>
         </View>
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
