@@ -3,6 +3,11 @@
     "name": "mobile",
     "slug": "mobile",
     "version": "1.0.0",
+    "icon": "./assets/logo.png",
+    "splash": {
+      "image": "./assets/logo.png",
+      "backgroundColor": "#000000"
+    },
     "extra": {
       "eas": {
         "projectId": "63af563a-f5e2-4300-a2cd-b7707856cbe2"
@@ -17,7 +22,11 @@
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
-      "package": "com.bekal.mobile"
+      "package": "com.bekal.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/logo.png",
+        "backgroundColor": "#000000"
+      }
     },
     "plugins": [
       [

@@ -7,7 +7,10 @@ import com.facebook.react.uimanager.ViewManager
 
 class AurisPackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
-        return listOf(AurisModule(reactContext))
+        return listOf(
+            AurisModule(reactContext),
+            AurisPhoneModule(reactContext)
+        )
     }
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
         return emptyList()

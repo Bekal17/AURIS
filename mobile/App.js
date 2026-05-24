@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  AppState,
   Animated,
   Easing,
   DeviceEventEmitter,
+  Image,
   NativeModules,
   SafeAreaView,
   ScrollView,
@@ -21,7 +23,7 @@ import {
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
 const WS_URL = 'wss://auris-production-a715.up.railway.app/ws';
-const { AurisModule } = NativeModules;
+const { AurisModule, AurisPhoneModule } = NativeModules;
 
 const ASSISTANT_STATE = {
   WAKE: 'WAKE',
@@ -80,6 +82,7 @@ export default function App() {
   const [stateLabel, setStateLabel] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].label);
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
+  const [audioOutputDevice, setAudioOutputDevice] = useState('unknown');
   const assistantStateRef = useRef(ASSISTANT_STATE.WAKE);
   const audioPlayerRef = useRef(null);
   const audioSubscriptionRef = useRef(null);
@@ -87,6 +90,9 @@ export default function App() {
   const listeningModeRef = useRef(LISTENING_MODE.WAKE);
   const voiceActiveRef = useRef(false);
   const processingSpeechRef = useRef(false);
+  const pendingIncomingCallRef = useRef(null);
+  const startupFlowCompleteRef = useRef(false);
+  const startupFlowRunningRef = useRef(false);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
   const wsRef = useRef(null);
@@ -147,19 +153,15 @@ export default function App() {
   }, [pulseOpacity, pulseScale, stateConfig.pulsing]);
 
   useEffect(() => {
-    async function startAlwaysOnListening() {
-      try {
-        AurisModule?.startForegroundService?.();
-      } catch (error) {
-        console.warn('Failed to start AURIS foreground service:', error);
+    runStartupPermissionFlow();
+    const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        runStartupPermissionFlow();
       }
-
-      await startWakeWordListening();
-    }
-
-    startAlwaysOnListening();
+    });
 
     return () => {
+      appStateSubscription.remove();
       clearReplyTimeout();
       clearSpeakingTimer();
       cleanupAudioPlayback();
@@ -170,37 +172,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    async function checkAccessibilityService() {
-      if (!AurisModule?.isAccessibilityEnabled) {
-        return;
-      }
-
-      try {
-        const enabled = await AurisModule.isAccessibilityEnabled();
-
-        if (!enabled) {
-          Alert.alert(
-            'Enable AURIS Accessibility',
-            'Turn on AURIS in Accessibility Settings so it can detect WhatsApp messages.',
-            [
-              { text: 'Not Now', style: 'cancel' },
-              {
-                text: 'Open Settings',
-                onPress: () => AurisModule.openAccessibilitySettings?.(),
-              },
-            ]
-          );
-        }
-      } catch (error) {
-        console.warn('Failed to check AURIS accessibility status:', error);
-      }
-    }
-
-    checkAccessibilityService();
-  }, []);
-
-  useEffect(() => {
-    const subscription = DeviceEventEmitter.addListener(
+    const whatsAppSubscription = DeviceEventEmitter.addListener(
       'onWhatsAppMessage',
       async (message) => {
         const rawMessage = String(message || '');
@@ -219,8 +191,35 @@ export default function App() {
         );
       }
     );
+    const incomingCallSubscription = DeviceEventEmitter.addListener(
+      'onIncomingCall',
+      async (caller) => {
+        await handleIncomingCall(caller);
+      }
+    );
+    const audioDeviceSubscription = DeviceEventEmitter.addListener(
+      'onAudioDeviceChanged',
+      async (device) => {
+        await handleAudioDeviceChanged(device);
+      }
+    );
+    const restartListeningSubscription = DeviceEventEmitter.addListener(
+      'onRestartListening',
+      () => {
+        restartCurrentListeningMode();
+      }
+    );
 
-    return () => subscription.remove();
+    return () => {
+      whatsAppSubscription.remove();
+      incomingCallSubscription.remove();
+      audioDeviceSubscription.remove();
+      restartListeningSubscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    initializeAudioOutputDevice();
   }, []);
 
   function clearSpeakingTimer() {
@@ -264,6 +263,236 @@ export default function App() {
       wsRef.current.close();
       wsRef.current = null;
     }
+  }
+
+  function updateFloatingState(state) {
+    try {
+      AurisModule?.updateFloatingState?.(state);
+    } catch (error) {
+      console.warn('Failed to update AURIS floating state:', error);
+    }
+  }
+
+  function normalizeAudioDevice(device) {
+    if (typeof device === 'string') {
+      return device.toLowerCase();
+    }
+
+    return (
+      device?.device ||
+      device?.type ||
+      device?.name ||
+      'unknown'
+    ).toLowerCase();
+  }
+
+  async function routeAudioForDevice(device) {
+    const nextDevice = normalizeAudioDevice(device);
+    setAudioOutputDevice(nextDevice);
+
+    try {
+      if (nextDevice.includes('bluetooth')) {
+        await AurisPhoneModule?.setAudioToBluetoothHeadset?.();
+      } else {
+        await AurisPhoneModule?.setAudioToSpeaker?.();
+      }
+    } catch (error) {
+      console.warn('Failed to route AURIS audio:', error);
+    }
+  }
+
+  async function initializeAudioOutputDevice() {
+    try {
+      const device = await AurisPhoneModule?.getAudioOutputDevice?.();
+
+      if (device) {
+        await routeAudioForDevice(device);
+      }
+    } catch (error) {
+      console.warn('Failed to initialize AURIS audio output:', error);
+    }
+  }
+
+  async function handleAudioDeviceChanged(device) {
+    await routeAudioForDevice(device);
+  }
+
+  async function runStartupPermissionFlow() {
+    if (startupFlowCompleteRef.current || startupFlowRunningRef.current) {
+      return;
+    }
+
+    startupFlowRunningRef.current = true;
+
+    try {
+      const micGranted = await requestStartupMicrophonePermission();
+
+      if (!micGranted) {
+        return;
+      }
+
+      const accessibilityGranted = await ensureAccessibilityPermission();
+
+      if (!accessibilityGranted) {
+        return;
+      }
+
+      const overlayGranted = await ensureOverlayPermission();
+
+      if (!overlayGranted) {
+        return;
+      }
+
+      const batteryOptimizationExempted = await ensureBatteryOptimizationExemption();
+
+      if (!batteryOptimizationExempted) {
+        return;
+      }
+
+      try {
+        AurisModule?.startForegroundService?.();
+        AurisModule?.startFloatingService?.();
+      } catch (error) {
+        console.warn('Failed to start AURIS background services:', error);
+      }
+
+      startupFlowCompleteRef.current = true;
+      await startWakeWordListening();
+    } finally {
+      startupFlowRunningRef.current = false;
+    }
+  }
+
+  async function requestStartupMicrophonePermission() {
+    try {
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          'Microphone Permission Required',
+          'AURIS needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+        );
+      }
+
+      return permission.granted;
+    } catch (error) {
+      console.warn('Speech recognition permission request failed:', error);
+      return false;
+    }
+  }
+
+  async function ensureAccessibilityPermission() {
+    if (!AurisModule?.isAccessibilityEnabled) {
+      return true;
+    }
+
+    try {
+      const enabled = await AurisModule.isAccessibilityEnabled();
+
+      if (enabled) {
+        return true;
+      }
+
+      Alert.alert(
+        'Enable AURIS Accessibility',
+        'Turn on AURIS in Accessibility Settings so it can detect WhatsApp messages.',
+        [
+          { text: 'Not Now', style: 'cancel' },
+          {
+            text: 'Open Settings',
+            onPress: () => AurisModule.openAccessibilitySettings?.(),
+          },
+        ]
+      );
+      return false;
+    } catch (error) {
+      console.warn('Failed to check AURIS accessibility status:', error);
+      return false;
+    }
+  }
+
+  async function ensureOverlayPermission() {
+    if (!AurisModule?.isOverlayPermissionGranted) {
+      return true;
+    }
+
+    try {
+      const granted = await AurisModule.isOverlayPermissionGranted();
+
+      if (granted) {
+        return true;
+      }
+
+      Alert.alert(
+        'Enable Overlay Permission',
+        'Allow AURIS to appear over other apps so it can assist while you drive.',
+        [
+          { text: 'Not Now', style: 'cancel' },
+          {
+            text: 'Open Settings',
+            onPress: () => AurisModule.requestOverlayPermission?.(),
+          },
+        ]
+      );
+      return false;
+    } catch (error) {
+      console.warn('Failed to check AURIS overlay permission:', error);
+      return false;
+    }
+  }
+
+  async function ensureBatteryOptimizationExemption() {
+    if (!AurisModule?.isBatteryOptimizationExempted) {
+      return true;
+    }
+
+    try {
+      const exempted = await AurisModule.isBatteryOptimizationExempted();
+
+      if (exempted) {
+        return true;
+      }
+
+      Alert.alert(
+        'Wajib: Izinkan AURIS Aktif Saat Layar Terkunci',
+        'AURIS membutuhkan izin ini agar tetap mendengarkan saat layar terkunci. Tanpa izin ini, AURIS tidak dapat membantu saat kamu berkendara.',
+        [
+          {
+            text: 'Izinkan Sekarang',
+            onPress: () => AurisModule.requestBatteryOptimizationExemption?.(),
+          },
+          {
+            text: 'Pelajari Lebih Lanjut',
+            onPress: showBatteryOptimizationExplanation,
+          },
+        ]
+      );
+      return false;
+    } catch (error) {
+      console.warn('Failed to check AURIS battery optimization status:', error);
+      return false;
+    }
+  }
+
+  function showBatteryOptimizationExplanation() {
+    Alert.alert(
+      'Mengapa Izin Ini Dibutuhkan',
+      'Android dapat menghentikan mikrofon, wake word, dan layanan background saat layar terkunci untuk menghemat baterai. AURIS membutuhkan pengecualian ini agar tetap siap membantu secara hands-free saat kamu berkendara.',
+      [
+        {
+          text: 'Izinkan Sekarang',
+          onPress: () => AurisModule?.requestBatteryOptimizationExemption?.(),
+        },
+        {
+          text: 'Kembali',
+          onPress: () => {
+            setTimeout(() => {
+              ensureBatteryOptimizationExemption();
+            }, 300);
+          },
+        },
+      ]
+    );
   }
 
   function connectWebSocket() {
@@ -363,6 +592,7 @@ export default function App() {
     setAssistantState(ASSISTANT_STATE.WAKE);
     setStatusText("Listening for 'Auris'...");
     setStateLabel("Say 'Auris' to activate");
+    updateFloatingState('idle');
     await startVoiceRecognition(LISTENING_MODE.WAKE);
   }
 
@@ -371,6 +601,7 @@ export default function App() {
     setAssistantState(ASSISTANT_STATE.LISTENING);
     setStatusText(nextStatus);
     setStateLabel('Listening...');
+    updateFloatingState('listening');
     await startVoiceRecognition(LISTENING_MODE.CONVERSATION);
     scheduleReplyTimeout();
   }
@@ -396,6 +627,79 @@ export default function App() {
     return event?.results?.map((result) => result.transcript).join(' ') || '';
   }
 
+  function getCallerName(caller) {
+    if (typeof caller === 'string') {
+      return caller || 'Tidak dikenal';
+    }
+
+    return caller?.name || caller?.number || caller?.caller || 'Tidak dikenal';
+  }
+
+  async function handleIncomingCall(caller) {
+    const callerName = getCallerName(caller);
+    const prompt = `Ada telepon masuk dari ${callerName}, angkat?`;
+
+    pendingIncomingCallRef.current = { callerName };
+    setTranscript(`Telepon masuk dari ${callerName}`);
+    setResponse(prompt);
+    await stopVoiceListening();
+    await sendTextToServer(`Ucapkan persis dalam Bahasa Indonesia: "${prompt}"`, () =>
+      startConversationListening('Listening for call command...')
+    );
+  }
+
+  async function executePhoneCommand(text) {
+    const command = text.toLowerCase();
+
+    try {
+      if (command.includes('angkat') && command.includes('loudspeaker')) {
+        await AurisPhoneModule?.answerCall?.();
+        await AurisPhoneModule?.setSpeakerOn?.(true);
+        pendingIncomingCallRef.current = null;
+        setResponse('Panggilan diangkat dengan loudspeaker.');
+        await startConversationListening();
+        return true;
+      }
+
+      if (command.includes('angkat')) {
+        await AurisPhoneModule?.answerCall?.();
+        pendingIncomingCallRef.current = null;
+        setResponse('Panggilan diangkat.');
+        await startConversationListening();
+        return true;
+      }
+
+      if (command.includes('tolak')) {
+        await AurisPhoneModule?.rejectCall?.();
+        pendingIncomingCallRef.current = null;
+        setResponse('Panggilan ditolak.');
+        await startWakeWordListening();
+        return true;
+      }
+
+      if (command.includes('mute')) {
+        await AurisPhoneModule?.setMute?.(true);
+        setResponse('Mikrofon dimute.');
+        await startConversationListening();
+        return true;
+      }
+
+      if (command.includes('loudspeaker')) {
+        await AurisPhoneModule?.setSpeakerOn?.(true);
+        setResponse('Loudspeaker dinyalakan.');
+        await startConversationListening();
+        return true;
+      }
+    } catch (error) {
+      console.error('Phone command failed:', error);
+      setResponse(`Gagal menjalankan perintah telepon: ${error.message}`);
+      await startConversationListening();
+      return true;
+    }
+
+    return false;
+  }
+
   async function handleSpeechRecognitionResult(event) {
     const text = getRecognizedText(event);
 
@@ -419,6 +723,12 @@ export default function App() {
       clearReplyTimeout();
       await stopVoiceListening();
       setTranscript(text.trim());
+
+      if (await executePhoneCommand(text.trim())) {
+        processingSpeechRef.current = false;
+        return;
+      }
+
       await sendTextToServer(text.trim(), () => startConversationListening());
     }
   }
@@ -431,6 +741,7 @@ export default function App() {
     processingSpeechRef.current = true;
     await stopVoiceListening();
     connectWebSocket();
+    updateFloatingState('active');
     setTranscript("Wake word detected: Auris");
     setResponse('Yes?');
     setAssistantState(ASSISTANT_STATE.SPEAKING);
@@ -492,6 +803,7 @@ export default function App() {
     }
 
     setAssistantState(ASSISTANT_STATE.SPEAKING);
+    updateFloatingState('speaking');
     scheduleIdleState(nextResponse, afterSpeech);
   }
 
@@ -512,6 +824,7 @@ export default function App() {
     setAssistantState(ASSISTANT_STATE.SPEAKING);
     setStatusText('Speaking...');
     setStateLabel('Speaking...');
+    updateFloatingState('speaking');
 
     audioSubscriptionRef.current = player.addListener('playbackStatusUpdate', (status) => {
       if (status.error) {
@@ -567,7 +880,7 @@ export default function App() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Text style={styles.appName}>AURIS</Text>
+          <Image source={require('./assets/logo.png')} style={styles.logo} />
           <Text style={styles.tagline}>Hands-free AI Assistant</Text>
         </View>
 
@@ -634,11 +947,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingTop: 34,
   },
-  appName: {
-    color: '#ffffff',
-    fontSize: 42,
-    fontWeight: '800',
-    letterSpacing: 6,
+  logo: {
+    height: 80,
+    width: 80,
   },
   tagline: {
     color: '#9ca3af',
