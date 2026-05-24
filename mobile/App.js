@@ -37,6 +37,8 @@ const LISTENING_MODE = {
   CONVERSATION: 'CONVERSATION',
 };
 
+const WAKE_WORDS = ['auris', 'hei auris', 'hey auris', 'aris', 'paris'];
+
 const STATE_CONFIG = {
   [ASSISTANT_STATE.WAKE]: {
     color: '#ffffff',
@@ -103,8 +105,8 @@ export default function App() {
   const stateConfig = STATE_CONFIG[assistantState];
 
   useSpeechRecognitionEvent('result', handleSpeechRecognitionResult);
-  useSpeechRecognitionEvent('end', restartCurrentListeningMode);
-  useSpeechRecognitionEvent('error', restartCurrentListeningMode);
+  useSpeechRecognitionEvent('end', handleRecognitionEnd);
+  useSpeechRecognitionEvent('error', handleRecognitionError);
 
   useEffect(() => {
     assistantStateRef.current = assistantState;
@@ -210,7 +212,7 @@ export default function App() {
     const restartListeningSubscription = DeviceEventEmitter.addListener(
       'onRestartListening',
       () => {
-        restartCurrentListeningMode();
+        restartRecognition();
       }
     );
 
@@ -259,7 +261,7 @@ export default function App() {
     clearReplyTimeout();
     replyTimeoutRef.current = setTimeout(() => {
       startWakeWordListening();
-    }, 5000);
+    }, 10000);
   }
 
   function closeWebSocket() {
@@ -582,7 +584,7 @@ export default function App() {
         lang: 'en-US',
         interimResults: true,
         continuous: true,
-        contextualStrings: ['Auris'],
+        contextualStrings: WAKE_WORDS,
         androidIntentOptions: {
           EXTRA_PARTIAL_RESULTS: true,
           EXTRA_LANGUAGE_MODEL: 'free_form',
@@ -633,25 +635,59 @@ export default function App() {
     scheduleReplyTimeout();
   }
 
-  function restartCurrentListeningMode() {
+  function isInWakeMode() {
+    return listeningModeRef.current === LISTENING_MODE.WAKE;
+  }
+
+  function restartRecognition() {
     if (
+      processingSpeechRef.current ||
       assistantStateRef.current === ASSISTANT_STATE.SPEAKING ||
       assistantStateRef.current === ASSISTANT_STATE.THINKING
     ) {
       return;
     }
 
-    setTimeout(() => {
-      if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
-        startVoiceRecognition(LISTENING_MODE.CONVERSATION);
-      } else {
-        startVoiceRecognition(LISTENING_MODE.WAKE);
-      }
-    }, 250);
+    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
+      startVoiceRecognition(LISTENING_MODE.CONVERSATION);
+    } else {
+      startVoiceRecognition(LISTENING_MODE.WAKE);
+    }
+  }
+
+  function handleRecognitionEnd() {
+    voiceActiveRef.current = false;
+
+    if (isInWakeMode()) {
+      setTimeout(() => restartRecognition(), 500);
+      return;
+    }
+
+    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
+      setTimeout(() => restartRecognition(), 500);
+    }
+  }
+
+  function handleRecognitionError() {
+    voiceActiveRef.current = false;
+    setTimeout(() => restartRecognition(), 1000);
   }
 
   function getRecognizedText(event) {
     return event?.results?.map((result) => result.transcript).join(' ') || '';
+  }
+
+  function hasWakeWord(text) {
+    const normalizedText = text
+      .toLowerCase()
+      .replace(/[^a-z\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return WAKE_WORDS.some((wakeWord) => {
+      const normalizedWakeWord = wakeWord.replace(/\s+/g, '\\s+');
+      return new RegExp(`(^|\\s)${normalizedWakeWord}(\\s|$)`).test(normalizedText);
+    });
   }
 
   function getCallerName(caller) {
@@ -734,7 +770,7 @@ export default function App() {
       return;
     }
 
-    if (listeningModeRef.current === LISTENING_MODE.WAKE && text.toLowerCase().includes('auris')) {
+    if (listeningModeRef.current === LISTENING_MODE.WAKE && hasWakeWord(text)) {
       await activateAuris();
       return;
     }

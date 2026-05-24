@@ -3,6 +3,9 @@ package com.bekal.mobile
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -20,6 +23,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
+import androidx.core.app.NotificationCompat
 
 class AurisFloatingService : Service() {
 
@@ -50,8 +54,35 @@ class AurisFloatingService : Service() {
         }
     }
 
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "auris_floating_channel",
+                "AURIS Floating",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                setShowBadge(false)
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        return NotificationCompat.Builder(this, "auris_floating_channel")
+            .setContentTitle("AURIS")
+            .setContentText("Aktif")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .build()
+    }
+
     override fun onCreate() {
         super.onCreate()
+        createNotificationChannel()
+        startForeground(2, buildNotification())
+
         isRunning = true
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
