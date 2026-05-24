@@ -1,5 +1,6 @@
 package com.bekal.mobile
 
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -19,7 +20,11 @@ class AurelSpeechModule(private val reactContext: ReactApplicationContext) : Rea
         UiThreadUtil.runOnUiThread {
             try {
                 speechRecognizer?.destroy()
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(reactContext)
+                val googleSpeechComponent = ComponentName(
+                    "com.google.android.googlequicksearchbox",
+                    "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
+                )
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(reactContext, googleSpeechComponent)
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
