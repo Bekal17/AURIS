@@ -54,7 +54,7 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => {
   res.json({ status: 'Aurel server running', port: PORT });
@@ -120,6 +120,48 @@ async function getTextToSpeechAudio(responseText) {
   return audioBuffer.toString('base64');
 }
 
+function pcm16MonoToWav(pcmBuffer, sampleRate = 16000) {
+  const header = Buffer.alloc(44);
+  const dataSize = pcmBuffer.length;
+  const byteRate = sampleRate * 2;
+  const blockAlign = 2;
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+function base64PcmToWav(base64Audio) {
+  const pcmBuffer = Buffer.from(String(base64Audio || ''), 'base64');
+  return pcm16MonoToWav(pcmBuffer);
+}
+
+async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wav', contentType = 'audio/wav') {
+  const transcription = await elevenlabs.speechToText.convert({
+    file: {
+      data: audioBuffer,
+      filename,
+      contentType,
+      contentLength: audioBuffer.length,
+    },
+    modelId: 'scribe_v2',
+  });
+
+  return getTranscriptionText(transcription);
+}
+
 async function buildTranscribeResponse(transcript) {
   const response = await getClaudeResponse(transcript);
   const audio = await getTextToSpeechAudio(response);
@@ -141,21 +183,30 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
       return;
     }
 
+    if (req.body?.audio) {
+      const wavAudio = base64PcmToWav(req.body.audio);
+      const transcript = await transcribeAudioBuffer(wavAudio);
+
+      if (!transcript) {
+        res.status(422).json({ error: 'No transcript returned from audio.' });
+        return;
+      }
+
+      const payload = await buildTranscribeResponse(transcript);
+      res.json(payload);
+      return;
+    }
+
     if (!req.file) {
       res.status(400).json({ error: 'Audio file or text is required.' });
       return;
     }
 
-    const transcription = await elevenlabs.speechToText.convert({
-      file: {
-        data: req.file.buffer,
-        filename: req.file.originalname || 'aurel-recording.m4a',
-        contentType: req.file.mimetype || 'audio/m4a',
-        contentLength: req.file.size,
-      },
-      modelId: 'scribe_v2',
-    });
-    const transcript = getTranscriptionText(transcription);
+    const transcript = await transcribeAudioBuffer(
+      req.file.buffer,
+      req.file.originalname || 'aurel-recording.m4a',
+      req.file.mimetype || 'audio/m4a'
+    );
 
     if (!transcript) {
       res.status(422).json({ error: 'No transcript returned from audio.' });
@@ -167,6 +218,23 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
   } catch (error) {
     console.error('Transcription error:', error);
     res.status(500).json({ error: 'Failed to transcribe audio.' });
+  }
+});
+
+app.post('/transcribe-wake', async (req, res) => {
+  try {
+    if (!req.body?.audio) {
+      res.status(400).json({ error: 'Audio is required.' });
+      return;
+    }
+
+    const wavAudio = base64PcmToWav(req.body.audio);
+    const transcript = await transcribeAudioBuffer(wavAudio, 'aurel-wake.wav', 'audio/wav');
+
+    res.json({ transcript });
+  } catch (error) {
+    console.error('Wake transcription error:', error);
+    res.status(500).json({ error: 'Failed to transcribe wake audio.' });
   }
 });
 

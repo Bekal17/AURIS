@@ -116,13 +116,12 @@ export default function App() {
   const listeningModeRef = useRef(LISTENING_MODE.WAKE);
   const voiceActiveRef = useRef(false);
   const processingSpeechRef = useRef(false);
+  const recordingActiveRef = useRef(false);
   const pendingIncomingCallRef = useRef(null);
   const pendingWhatsAppCallRef = useRef(null);
   const pendingWhatsAppReplyRef = useRef(null);
   const startupFlowCompleteRef = useRef(false);
   const startupFlowRunningRef = useRef(false);
-  const manualSpeechStopRef = useRef(false);
-  const speechRestartTimeoutRef = useRef(null);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
   const wsRef = useRef(null);
@@ -199,7 +198,6 @@ export default function App() {
       return () => {
         appStateSubscription.remove();
         clearReplyTimeout();
-        clearSpeechRestartTimeout();
         clearSpeakingTimer();
         cleanupAudioPlayback();
         closeWebSocket();
@@ -256,27 +254,9 @@ export default function App() {
           await handleAudioDeviceChanged(device);
         }
       );
-      const restartListeningSubscription = DeviceEventEmitter.addListener(
-        'onRestartListening',
-        () => {
-          restartRecognition();
-        }
-      );
-      const speechPartialSubscription = DeviceEventEmitter.addListener(
-        'onSpeechPartial',
-        handleSpeechPartial
-      );
-      const speechResultSubscription = DeviceEventEmitter.addListener(
-        'onSpeechResult',
-        handleSpeechResult
-      );
-      const speechEndSubscription = DeviceEventEmitter.addListener(
-        'onSpeechEnd',
-        handleRecognitionEnd
-      );
-      const speechErrorSubscription = DeviceEventEmitter.addListener(
-        'onSpeechError',
-        handleRecognitionError
+      const recordingCompleteSubscription = DeviceEventEmitter.addListener(
+        'onRecordingComplete',
+        handleRecordingComplete
       );
 
       return () => {
@@ -284,11 +264,7 @@ export default function App() {
         incomingCallSubscription.remove();
         whatsAppCallSubscription.remove();
         audioDeviceSubscription.remove();
-        restartListeningSubscription.remove();
-        speechPartialSubscription.remove();
-        speechResultSubscription.remove();
-        speechEndSubscription.remove();
-        speechErrorSubscription.remove();
+        recordingCompleteSubscription.remove();
       };
     } catch (e) {
       console.error('useEffect error:', e.message);
@@ -330,13 +306,6 @@ export default function App() {
     if (replyTimeoutRef.current) {
       clearTimeout(replyTimeoutRef.current);
       replyTimeoutRef.current = null;
-    }
-  }
-
-  function clearSpeechRestartTimeout() {
-    if (speechRestartTimeoutRef.current) {
-      clearTimeout(speechRestartTimeoutRef.current);
-      speechRestartTimeoutRef.current = null;
     }
   }
 
@@ -461,7 +430,7 @@ export default function App() {
 
       return granted;
     } catch (error) {
-      console.warn('Speech recognition permission request failed:', error);
+      console.warn('Audio recording permission request failed:', error);
       return false;
     }
   }
@@ -582,51 +551,55 @@ export default function App() {
 
   async function stopVoiceListening() {
     try {
-      manualSpeechStopRef.current = true;
-      await callNativeModule('AurelSpeechModule', 'stopListening');
+      recordingActiveRef.current = false;
+      await callNativeModule('AurelSpeechModule', 'stopRecordingChunk');
     } catch (error) {
-      console.warn('Speech recognition stop failed:', error);
+      console.warn('Audio recording stop failed:', error);
     } finally {
       voiceActiveRef.current = false;
-      setTimeout(() => {
-        manualSpeechStopRef.current = false;
-      }, 500);
     }
   }
 
-  async function startVoiceRecognition(mode) {
+  async function startAudioRecording(mode) {
     try {
-      clearSpeechRestartTimeout();
       await stopVoiceListening();
       const hasPermission = await ensureSpeechRecognitionPermission();
 
       if (!hasPermission) {
         Alert.alert(
-          'Voice Recognition Required',
+          'Audio Recording Required',
           'Aurel needs microphone and speech recognition access. Please enable microphone permission in Settings.'
         );
         return;
       }
 
-      if (!hasNativeMethod('AurelSpeechModule', 'startListening')) {
+      if (!hasNativeMethod('AurelSpeechModule', 'startRecordingChunk')) {
         Alert.alert(
-          'Voice Recognition Required',
-          'Aurel native speech recognition is not available in this build.'
+          'Audio Recording Required',
+          'Aurel native audio recording is not available in this build.'
         );
         return;
       }
 
       listeningModeRef.current = mode;
       voiceActiveRef.current = true;
+      recordingActiveRef.current = true;
       processingSpeechRef.current = false;
-      await callNativeModule('AurelSpeechModule', 'startListening', 'id-ID');
+      const durationMs = mode === LISTENING_MODE.CONVERSATION ? 5000 : 3000;
+
+      if (hasNativeMethod('AurelSpeechModule', 'startRecordingChunkWithDuration')) {
+        await callNativeModule('AurelSpeechModule', 'startRecordingChunkWithDuration', durationMs);
+      } else {
+        await callNativeModule('AurelSpeechModule', 'startRecordingChunk');
+      }
     } catch (error) {
       voiceActiveRef.current = false;
+      recordingActiveRef.current = false;
       Alert.alert(
-        'Voice Recognition Required',
+        'Audio Recording Required',
         'Aurel needs microphone and speech recognition access. Please enable microphone permission in Settings.'
       );
-      console.warn('Speech recognition failed:', error);
+      console.warn('Audio recording failed:', error);
     }
   }
 
@@ -645,7 +618,7 @@ export default function App() {
       );
       return requestedPermission === PermissionsAndroid.RESULTS.GRANTED;
     } catch (error) {
-      console.warn('Speech recognition permission check failed:', error);
+      console.warn('Audio recording permission check failed:', error);
       return false;
     }
   }
@@ -656,7 +629,7 @@ export default function App() {
     setStatusText("Mendengarkan 'Aurel'...");
     setStateLabel("Ucapkan 'Aurel' untuk memulai");
     updateNotificationState('idle');
-    await startVoiceRecognition(LISTENING_MODE.WAKE);
+    await startAudioRecording(LISTENING_MODE.WAKE);
   }
 
   async function startConversationListening(nextStatus = 'Mendengarkan balasan...') {
@@ -665,53 +638,8 @@ export default function App() {
     setStatusText(nextStatus);
     setStateLabel('Mendengarkan...');
     updateNotificationState('listening');
-    await startVoiceRecognition(LISTENING_MODE.CONVERSATION);
+    await startAudioRecording(LISTENING_MODE.CONVERSATION);
     scheduleReplyTimeout();
-  }
-
-  function isInWakeMode() {
-    return listeningModeRef.current === LISTENING_MODE.WAKE;
-  }
-
-  function restartRecognition() {
-    if (
-      processingSpeechRef.current ||
-      assistantStateRef.current === ASSISTANT_STATE.SPEAKING ||
-      assistantStateRef.current === ASSISTANT_STATE.THINKING
-    ) {
-      return;
-    }
-
-    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
-      startVoiceRecognition(LISTENING_MODE.CONVERSATION);
-    } else {
-      startVoiceRecognition(LISTENING_MODE.WAKE);
-    }
-  }
-
-  function scheduleRecognitionRestart(delayMs) {
-    if (manualSpeechStopRef.current) {
-      return;
-    }
-
-    clearSpeechRestartTimeout();
-    speechRestartTimeoutRef.current = setTimeout(() => {
-      speechRestartTimeoutRef.current = null;
-      restartRecognition();
-    }, delayMs);
-  }
-
-  function handleRecognitionEnd() {
-    voiceActiveRef.current = false;
-
-    if (isInWakeMode()) {
-      scheduleRecognitionRestart(300);
-    }
-  }
-
-  function handleRecognitionError() {
-    voiceActiveRef.current = false;
-    scheduleRecognitionRestart(1000);
   }
 
   function hasWakeWord(text) {
@@ -978,43 +906,57 @@ export default function App() {
     return false;
   }
 
-  async function handleSpeechPartial(text) {
-    if (!text) {
+  async function handleRecordingComplete(base64Audio) {
+    recordingActiveRef.current = false;
+
+    if (!base64Audio || processingSpeechRef.current) {
+      if (listeningModeRef.current === LISTENING_MODE.WAKE && !processingSpeechRef.current) {
+        await startWakeWordListening();
+      }
       return;
     }
 
-    if (listeningModeRef.current === LISTENING_MODE.WAKE && hasWakeWord(text)) {
-      await activateAurel();
+    if (listeningModeRef.current === LISTENING_MODE.WAKE) {
+      await handleWakeRecordingComplete(base64Audio);
       return;
     }
 
-    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
-      scheduleReplyTimeout();
-    }
+    await handleConversationRecordingComplete(base64Audio);
   }
 
-  async function handleSpeechResult(text) {
-    if (!text) {
-      return;
+  async function handleWakeRecordingComplete(base64Audio) {
+    try {
+      const transcript = await transcribeWakeAudio(base64Audio);
+
+      if (transcript) {
+        setTranscript(transcript);
+      }
+
+      if (hasWakeWord(transcript)) {
+        await activateAurel();
+        return;
+      }
+    } catch (error) {
+      console.warn('Wake transcription failed:', error);
     }
 
-    const commandText = String(text).trim();
+    await startWakeWordListening();
+  }
 
-    if (listeningModeRef.current === LISTENING_MODE.WAKE && hasWakeWord(commandText)) {
-      await activateAurel();
-      return;
-    }
+  async function handleConversationRecordingComplete(base64Audio) {
+    processingSpeechRef.current = true;
+    clearReplyTimeout();
 
-    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
-      scheduleReplyTimeout();
+    try {
+      const data = await transcribeConversationAudio(base64Audio);
+      const commandText = String(data.transcript || '').trim();
 
-      if (processingSpeechRef.current) {
+      if (!commandText) {
+        processingSpeechRef.current = false;
+        await startConversationListening();
         return;
       }
 
-      processingSpeechRef.current = true;
-      clearReplyTimeout();
-      await stopVoiceListening();
       setTranscript(commandText);
 
       if (await executeVolumeCommand(commandText)) {
@@ -1037,8 +979,49 @@ export default function App() {
         return;
       }
 
-      await sendTextToServer(commandText, () => startConversationListening());
+      const nextResponse = data.response || data.reply || data.answer || 'Tidak ada respons.';
+      setResponse(nextResponse);
+      await playResponseAudioOrSchedule(data.audio, nextResponse, () => startConversationListening());
+    } catch (error) {
+      console.error('Failed to process recorded command:', error);
+      setResponse(`Server error: ${error.message}`);
+      processingSpeechRef.current = false;
+      await startWakeWordListening();
     }
+  }
+
+  async function transcribeWakeAudio(audio) {
+    const result = await fetch(`${SERVER_URL}/transcribe-wake`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ audio, type: 'wake' }),
+    });
+    const data = await result.json();
+
+    if (!result.ok) {
+      throw new Error(data.error || `Server returned ${result.status}`);
+    }
+
+    return String(data.transcript || '').trim();
+  }
+
+  async function transcribeConversationAudio(audio) {
+    const result = await fetch(`${SERVER_URL}/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ audio }),
+    });
+    const data = await result.json();
+
+    if (!result.ok) {
+      throw new Error(data.error || data.response || `Server returned ${result.status}`);
+    }
+
+    return data;
   }
 
   async function activateAurel() {
