@@ -7,6 +7,7 @@ import {
   DeviceEventEmitter,
   Image,
   NativeModules,
+  PermissionsAndroid,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -16,14 +17,10 @@ import {
 } from 'react-native';
 import { createAudioPlayer } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
 const WS_URL = 'wss://auris-production-a715.up.railway.app/ws';
-const { AurisModule, AurisPhoneModule } = NativeModules;
+const { AurisModule, AurisPhoneModule, AurelSpeechModule } = NativeModules;
 
 const ASSISTANT_STATE = {
   WAKE: 'WAKE',
@@ -37,31 +34,32 @@ const LISTENING_MODE = {
   CONVERSATION: 'CONVERSATION',
 };
 
-const WAKE_WORDS = ['auris', 'hei auris', 'hey auris', 'aris', 'paris'];
+const AUREL_GREEN = '#00FF41';
+const WAKE_WORDS = ['aurel', 'hei aurel', 'hey aurel', 'orel', 'el'];
 
 const STATE_CONFIG = {
   [ASSISTANT_STATE.WAKE]: {
-    color: '#ffffff',
-    label: "Say 'Auris' to activate",
-    status: "Listening for 'Auris'...",
+    color: AUREL_GREEN,
+    label: "Ucapkan 'Aurel' untuk memulai",
+    status: "Mendengarkan 'Aurel'...",
     pulsing: true,
   },
   [ASSISTANT_STATE.LISTENING]: {
-    color: '#ff3b30',
-    label: 'Listening...',
-    status: 'Listening',
+    color: AUREL_GREEN,
+    label: 'Mendengarkan...',
+    status: 'Mendengarkan balasan...',
     pulsing: true,
   },
   [ASSISTANT_STATE.THINKING]: {
     color: '#ffd60a',
-    label: 'Processing...',
-    status: 'Processing',
+    label: 'Memproses...',
+    status: 'Memproses...',
     pulsing: false,
   },
   [ASSISTANT_STATE.SPEAKING]: {
-    color: '#30d158',
-    label: 'Speaking...',
-    status: 'Speaking',
+    color: AUREL_GREEN,
+    label: 'Aurel sedang berbicara...',
+    status: 'Aurel sedang berbicara...',
     pulsing: true,
   },
 };
@@ -93,8 +91,12 @@ export default function App() {
   const voiceActiveRef = useRef(false);
   const processingSpeechRef = useRef(false);
   const pendingIncomingCallRef = useRef(null);
+  const pendingWhatsAppCallRef = useRef(null);
+  const pendingWhatsAppReplyRef = useRef(null);
   const startupFlowCompleteRef = useRef(false);
   const startupFlowRunningRef = useRef(false);
+  const manualSpeechStopRef = useRef(false);
+  const speechRestartTimeoutRef = useRef(null);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
   const wsRef = useRef(null);
@@ -102,10 +104,6 @@ export default function App() {
   const pulseOpacity = useRef(new Animated.Value(0.35)).current;
 
   const stateConfig = STATE_CONFIG[assistantState];
-
-  useSpeechRecognitionEvent('result', handleSpeechRecognitionResult);
-  useSpeechRecognitionEvent('end', handleRecognitionEnd);
-  useSpeechRecognitionEvent('error', handleRecognitionError);
 
   useEffect(() => {
     assistantStateRef.current = assistantState;
@@ -165,11 +163,12 @@ export default function App() {
     return () => {
       appStateSubscription.remove();
       clearReplyTimeout();
+      clearSpeechRestartTimeout();
       clearSpeakingTimer();
       cleanupAudioPlayback();
       closeWebSocket();
       AurisModule?.stopForegroundService?.();
-      ExpoSpeechRecognitionModule.abort();
+      AurelSpeechModule?.destroyRecognizer?.();
     };
   }, []);
 
@@ -183,13 +182,18 @@ export default function App() {
           separatorIndex >= 0 ? rawMessage.slice(0, separatorIndex).trim() : 'Unknown';
         const text =
           separatorIndex >= 0 ? rawMessage.slice(separatorIndex + 1).trim() : rawMessage;
-        const nextTranscript = `WhatsApp from ${sender}: ${text}`;
+        const nextTranscript = `WhatsApp dari ${sender}: ${text}`;
 
+        pendingWhatsAppReplyRef.current = {
+          sender,
+          message: text,
+          awaitingReplyText: false,
+        };
         setTranscript(nextTranscript);
         await stopVoiceListening();
         await sendTextToServer(
-          `Read this WhatsApp notification aloud, then ask if I want to reply: ${nextTranscript}`,
-          () => startConversationListening()
+          `Ada pesan WhatsApp dari ${sender}: ${text}. Bacakan dan tanya apakah mau dibalas`,
+          () => startConversationListening('Mendengarkan perintah balasan WhatsApp...')
         );
       }
     );
@@ -197,6 +201,12 @@ export default function App() {
       'onIncomingCall',
       async (caller) => {
         await handleIncomingCall(caller);
+      }
+    );
+    const whatsAppCallSubscription = DeviceEventEmitter.addListener(
+      'onWhatsAppCall',
+      async (title) => {
+        await handleWhatsAppCall(title);
       }
     );
     const audioDeviceSubscription = DeviceEventEmitter.addListener(
@@ -211,12 +221,33 @@ export default function App() {
         restartRecognition();
       }
     );
+    const speechPartialSubscription = DeviceEventEmitter.addListener(
+      'onSpeechPartial',
+      handleSpeechPartial
+    );
+    const speechResultSubscription = DeviceEventEmitter.addListener(
+      'onSpeechResult',
+      handleSpeechResult
+    );
+    const speechEndSubscription = DeviceEventEmitter.addListener(
+      'onSpeechEnd',
+      handleRecognitionEnd
+    );
+    const speechErrorSubscription = DeviceEventEmitter.addListener(
+      'onSpeechError',
+      handleRecognitionError
+    );
 
     return () => {
       whatsAppSubscription.remove();
       incomingCallSubscription.remove();
+      whatsAppCallSubscription.remove();
       audioDeviceSubscription.remove();
       restartListeningSubscription.remove();
+      speechPartialSubscription.remove();
+      speechResultSubscription.remove();
+      speechEndSubscription.remove();
+      speechErrorSubscription.remove();
     };
   }, []);
 
@@ -253,10 +284,17 @@ export default function App() {
     }
   }
 
+  function clearSpeechRestartTimeout() {
+    if (speechRestartTimeoutRef.current) {
+      clearTimeout(speechRestartTimeoutRef.current);
+      speechRestartTimeoutRef.current = null;
+    }
+  }
+
   function scheduleReplyTimeout() {
     clearReplyTimeout();
     replyTimeoutRef.current = setTimeout(() => {
-      startWakeWordListening();
+      playSleepSoundAndStartWakeMode();
     }, 10000);
   }
 
@@ -271,7 +309,7 @@ export default function App() {
     try {
       AurisModule?.updateNotificationState?.(state);
     } catch (error) {
-      console.warn('Failed to update AURIS notification state:', error);
+      console.warn('Failed to update Aurel notification state:', error);
     }
   }
 
@@ -299,7 +337,7 @@ export default function App() {
         await AurisPhoneModule?.setAudioToSpeaker?.();
       }
     } catch (error) {
-      console.warn('Failed to route AURIS audio:', error);
+      console.warn('Failed to route Aurel audio:', error);
     }
   }
 
@@ -311,7 +349,7 @@ export default function App() {
         await routeAudioForDevice(device);
       }
     } catch (error) {
-      console.warn('Failed to initialize AURIS audio output:', error);
+      console.warn('Failed to initialize Aurel audio output:', error);
     }
   }
 
@@ -348,7 +386,7 @@ export default function App() {
       try {
         AurisModule?.startForegroundService?.();
       } catch (error) {
-        console.warn('Failed to start AURIS background services:', error);
+        console.warn('Failed to start Aurel background services:', error);
       }
 
       startupFlowCompleteRef.current = true;
@@ -360,16 +398,19 @@ export default function App() {
 
   async function requestStartupMicrophonePermission() {
     try {
-      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      const permission = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
+      const granted = permission === PermissionsAndroid.RESULTS.GRANTED;
 
-      if (!permission.granted) {
+      if (!granted) {
         Alert.alert(
           'Microphone Permission Required',
-          'AURIS needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+          'Aurel needs microphone and speech recognition access. Please enable microphone permission in Settings.'
         );
       }
 
-      return permission.granted;
+      return granted;
     } catch (error) {
       console.warn('Speech recognition permission request failed:', error);
       return false;
@@ -389,8 +430,8 @@ export default function App() {
       }
 
       Alert.alert(
-        'Enable AURIS Accessibility',
-        'Turn on AURIS in Accessibility Settings so it can detect WhatsApp messages.',
+        'Enable Aurel Accessibility',
+        'Turn on Aurel in Accessibility Settings so it can detect WhatsApp messages.',
         [
           {
             text: 'Open Settings',
@@ -401,7 +442,7 @@ export default function App() {
       );
       return false;
     } catch (error) {
-      console.warn('Failed to check AURIS accessibility status:', error);
+      console.warn('Failed to check Aurel accessibility status:', error);
       return false;
     }
   }
@@ -419,8 +460,8 @@ export default function App() {
       }
 
       Alert.alert(
-        'Wajib: Izinkan AURIS Aktif Saat Layar Terkunci',
-        'AURIS membutuhkan izin ini agar tetap mendengarkan saat layar terkunci. Tanpa izin ini, AURIS tidak dapat membantu saat kamu berkendara.',
+        'Wajib: Izinkan Aurel Aktif Saat Layar Terkunci',
+        'Aurel membutuhkan izin ini agar tetap mendengarkan saat layar terkunci. Tanpa izin ini, Aurel tidak dapat membantu saat kamu berkendara.',
         [
           {
             text: 'Izinkan Sekarang',
@@ -434,7 +475,7 @@ export default function App() {
       );
       return false;
     } catch (error) {
-      console.warn('Failed to check AURIS battery optimization status:', error);
+      console.warn('Failed to check Aurel battery optimization status:', error);
       return false;
     }
   }
@@ -442,7 +483,7 @@ export default function App() {
   function showBatteryOptimizationExplanation() {
     Alert.alert(
       'Mengapa Izin Ini Dibutuhkan',
-      'Android dapat menghentikan mikrofon, wake word, dan layanan background saat layar terkunci untuk menghemat baterai. AURIS membutuhkan pengecualian ini agar tetap siap membantu secara hands-free saat kamu berkendara.',
+      'Android dapat menghentikan mikrofon, wake word, dan layanan background saat layar terkunci untuk menghemat baterai. Aurel membutuhkan pengecualian ini agar tetap siap membantu secara hands-free saat kamu berkendara.',
       [
         {
           text: 'Izinkan Sekarang',
@@ -486,29 +527,42 @@ export default function App() {
       }
     };
     wsRef.current.onerror = (error) => {
-      console.warn('AURIS WebSocket error:', error);
+      console.warn('Aurel WebSocket error:', error);
     };
   }
 
   async function stopVoiceListening() {
     try {
-      ExpoSpeechRecognitionModule.stop();
+      manualSpeechStopRef.current = true;
+      await AurelSpeechModule?.stopListening?.();
     } catch (error) {
       console.warn('Speech recognition stop failed:', error);
     } finally {
       voiceActiveRef.current = false;
+      setTimeout(() => {
+        manualSpeechStopRef.current = false;
+      }, 500);
     }
   }
 
   async function startVoiceRecognition(mode) {
     try {
+      clearSpeechRestartTimeout();
       await stopVoiceListening();
       const hasPermission = await ensureSpeechRecognitionPermission();
 
       if (!hasPermission) {
         Alert.alert(
           'Voice Recognition Required',
-          'AURIS needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+          'Aurel needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+        );
+        return;
+      }
+
+      if (!AurelSpeechModule?.startListening) {
+        Alert.alert(
+          'Voice Recognition Required',
+          'Aurel native speech recognition is not available in this build.'
         );
         return;
       }
@@ -516,21 +570,12 @@ export default function App() {
       listeningModeRef.current = mode;
       voiceActiveRef.current = true;
       processingSpeechRef.current = false;
-      ExpoSpeechRecognitionModule.start({
-        lang: 'en-US',
-        interimResults: true,
-        continuous: true,
-        contextualStrings: WAKE_WORDS,
-        androidIntentOptions: {
-          EXTRA_PARTIAL_RESULTS: true,
-          EXTRA_LANGUAGE_MODEL: 'free_form',
-        },
-      });
+      await AurelSpeechModule?.startListening?.('id-ID');
     } catch (error) {
       voiceActiveRef.current = false;
       Alert.alert(
         'Voice Recognition Required',
-        'AURIS needs microphone and speech recognition access. Please enable microphone permission in Settings.'
+        'Aurel needs microphone and speech recognition access. Please enable microphone permission in Settings.'
       );
       console.warn('Speech recognition failed:', error);
     }
@@ -538,14 +583,18 @@ export default function App() {
 
   async function ensureSpeechRecognitionPermission() {
     try {
-      const existingPermission = await ExpoSpeechRecognitionModule.getPermissionsAsync();
+      const existingPermission = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
 
-      if (existingPermission.granted) {
+      if (existingPermission) {
         return true;
       }
 
-      const requestedPermission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      return requestedPermission.granted;
+      const requestedPermission = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
+      return requestedPermission === PermissionsAndroid.RESULTS.GRANTED;
     } catch (error) {
       console.warn('Speech recognition permission check failed:', error);
       return false;
@@ -555,17 +604,17 @@ export default function App() {
   async function startWakeWordListening() {
     clearReplyTimeout();
     setAssistantState(ASSISTANT_STATE.WAKE);
-    setStatusText("Listening for 'Auris'...");
-    setStateLabel("Say 'Auris' to activate");
+    setStatusText("Mendengarkan 'Aurel'...");
+    setStateLabel("Ucapkan 'Aurel' untuk memulai");
     updateNotificationState('idle');
     await startVoiceRecognition(LISTENING_MODE.WAKE);
   }
 
-  async function startConversationListening(nextStatus = 'Listening for reply...') {
+  async function startConversationListening(nextStatus = 'Mendengarkan balasan...') {
     clearReplyTimeout();
     setAssistantState(ASSISTANT_STATE.LISTENING);
     setStatusText(nextStatus);
-    setStateLabel('Listening...');
+    setStateLabel('Mendengarkan...');
     updateNotificationState('listening');
     await startVoiceRecognition(LISTENING_MODE.CONVERSATION);
     scheduleReplyTimeout();
@@ -591,26 +640,29 @@ export default function App() {
     }
   }
 
+  function scheduleRecognitionRestart(delayMs) {
+    if (manualSpeechStopRef.current) {
+      return;
+    }
+
+    clearSpeechRestartTimeout();
+    speechRestartTimeoutRef.current = setTimeout(() => {
+      speechRestartTimeoutRef.current = null;
+      restartRecognition();
+    }, delayMs);
+  }
+
   function handleRecognitionEnd() {
     voiceActiveRef.current = false;
 
     if (isInWakeMode()) {
-      setTimeout(() => restartRecognition(), 500);
-      return;
-    }
-
-    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
-      setTimeout(() => restartRecognition(), 500);
+      scheduleRecognitionRestart(300);
     }
   }
 
   function handleRecognitionError() {
     voiceActiveRef.current = false;
-    setTimeout(() => restartRecognition(), 1000);
-  }
-
-  function getRecognizedText(event) {
-    return event?.results?.map((result) => result.transcript).join(' ') || '';
+    scheduleRecognitionRestart(1000);
   }
 
   function hasWakeWord(text) {
@@ -634,6 +686,19 @@ export default function App() {
     return caller?.name || caller?.number || caller?.caller || 'Tidak dikenal';
   }
 
+  function getWhatsAppCallerName(title) {
+    const rawTitle = String(title || '').trim();
+    const callerName = rawTitle
+      .replace(/panggilan masuk/gi, '')
+      .replace(/incoming video call/gi, '')
+      .replace(/incoming call/gi, '')
+      .replace(/[:\-–—]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return callerName || rawTitle || 'Tidak dikenal';
+  }
+
   async function handleIncomingCall(caller) {
     const callerName = getCallerName(caller);
     const prompt = `Ada telepon masuk dari ${callerName}, angkat?`;
@@ -643,8 +708,166 @@ export default function App() {
     setResponse(prompt);
     await stopVoiceListening();
     await sendTextToServer(`Ucapkan persis dalam Bahasa Indonesia: "${prompt}"`, () =>
-      startConversationListening('Listening for call command...')
+      startConversationListening('Mendengarkan perintah telepon...')
     );
+  }
+
+  async function handleWhatsAppCall(title) {
+    const callerName = getWhatsAppCallerName(title);
+    const prompt = `Ada panggilan WhatsApp dari ${callerName}. Angkat, angkat loudspeaker, atau tolak?`;
+
+    pendingWhatsAppCallRef.current = { callerName };
+    setTranscript(`Panggilan WhatsApp dari ${callerName}`);
+    setResponse(prompt);
+    await stopVoiceListening();
+    await speakText(prompt, () =>
+      startConversationListening('Mendengarkan perintah panggilan WhatsApp...')
+    );
+  }
+
+  function getWhatsAppReplyText(commandText) {
+    return commandText.replace(/^.*?\bbalas\b/i, '').trim();
+  }
+
+  async function executeWhatsAppCommand(text) {
+    const pendingWhatsApp = pendingWhatsAppReplyRef.current;
+
+    if (!pendingWhatsApp) {
+      return false;
+    }
+
+    const command = text.toLowerCase();
+
+    if (command.includes('abaikan') || command.includes('skip')) {
+      pendingWhatsAppReplyRef.current = null;
+      setResponse('Pesan WhatsApp diabaikan.');
+      await startWakeWordListening();
+      return true;
+    }
+
+    if (pendingWhatsApp.awaitingReplyText) {
+      await sendWhatsAppReply(text.trim());
+      return true;
+    }
+
+    if (command.includes('balas')) {
+      const replyText = getWhatsAppReplyText(text);
+
+      if (!replyText) {
+        pendingWhatsAppReplyRef.current = {
+          ...pendingWhatsApp,
+          awaitingReplyText: true,
+        };
+        setResponse('Mau balas apa?');
+        await startConversationListening('Mendengarkan teks balasan WhatsApp...');
+        return true;
+      }
+
+      await sendWhatsAppReply(replyText);
+      return true;
+    }
+
+    return false;
+  }
+
+  async function sendWhatsAppReply(replyText) {
+    try {
+      await AurisModule?.replyToWhatsApp?.(replyText);
+      pendingWhatsAppReplyRef.current = null;
+      setTranscript(`Balas WhatsApp: ${replyText}`);
+      setResponse('Pesan WhatsApp dikirim.');
+      await startWakeWordListening();
+    } catch (error) {
+      setResponse(`Gagal mengirim balasan WhatsApp: ${error.message}`);
+      await startConversationListening('Mendengarkan perintah balasan WhatsApp...');
+    }
+  }
+
+  async function executeWhatsAppCallCommand(text) {
+    if (!pendingWhatsAppCallRef.current) {
+      return false;
+    }
+
+    const command = text.toLowerCase();
+
+    try {
+      if (command.includes('abaikan')) {
+        pendingWhatsAppCallRef.current = null;
+        setResponse('Panggilan WhatsApp diabaikan.');
+        await startWakeWordListening();
+        return true;
+      }
+
+      if (command.includes('tolak') || command.includes('jangan') || command.includes('reject')) {
+        await AurisPhoneModule?.rejectWhatsAppCall?.();
+        pendingWhatsAppCallRef.current = null;
+        setResponse('Panggilan WhatsApp ditolak.');
+        await startWakeWordListening();
+        return true;
+      }
+
+      if (
+        command.includes('angkat loudspeaker') ||
+        (command.includes('angkat') && command.includes('speaker')) ||
+        command.includes('speaker')
+      ) {
+        await AurisPhoneModule?.answerWhatsAppCall?.();
+        await AurisPhoneModule?.setSpeakerOn?.(true);
+        pendingWhatsAppCallRef.current = null;
+        setResponse('Panggilan WhatsApp diangkat dengan loudspeaker.');
+        await startConversationListening();
+        return true;
+      }
+
+      if (command.includes('angkat')) {
+        await AurisPhoneModule?.answerWhatsAppCall?.();
+        pendingWhatsAppCallRef.current = null;
+        setResponse('Panggilan WhatsApp diangkat.');
+        await startConversationListening();
+        return true;
+      }
+    } catch (error) {
+      console.error('WhatsApp call command failed:', error);
+      setResponse(`Gagal menjalankan perintah panggilan WhatsApp: ${error.message}`);
+      await startConversationListening('Mendengarkan perintah panggilan WhatsApp...');
+      return true;
+    }
+
+    return false;
+  }
+
+  async function executeVolumeCommand(text) {
+    const command = text.toLowerCase();
+    let direction = null;
+
+    if (command.includes('volume maksimal')) {
+      direction = 'max';
+    } else if (command.includes('volume minimal')) {
+      direction = 'min';
+    } else if (command.includes('kecilkan volume') || command.includes('volume kecil')) {
+      direction = 'down';
+    } else if (
+      command.includes('besarkan volume') ||
+      command.includes('volume besar') ||
+      command.includes('keraskan')
+    ) {
+      direction = 'up';
+    }
+
+    if (!direction) {
+      return false;
+    }
+
+    try {
+      await AurisPhoneModule?.setVolume?.(direction);
+      setResponse('Volume disesuaikan.');
+      await startConversationListening();
+    } catch (error) {
+      setResponse(`Gagal mengatur volume: ${error.message}`);
+      await startConversationListening();
+    }
+
+    return true;
   }
 
   async function executePhoneCommand(text) {
@@ -676,7 +899,14 @@ export default function App() {
         return true;
       }
 
-      if (command.includes('mute')) {
+      if (command.includes('unmute') || command.includes('aktifkan mic')) {
+        await AurisPhoneModule?.setMute?.(false);
+        setResponse('Mikrofon diaktifkan.');
+        await startConversationListening();
+        return true;
+      }
+
+      if (command.includes('mute') || command.includes('bisukan')) {
         await AurisPhoneModule?.setMute?.(true);
         setResponse('Mikrofon dimute.');
         await startConversationListening();
@@ -699,40 +929,70 @@ export default function App() {
     return false;
   }
 
-  async function handleSpeechRecognitionResult(event) {
-    const text = getRecognizedText(event);
-
+  async function handleSpeechPartial(text) {
     if (!text) {
       return;
     }
 
     if (listeningModeRef.current === LISTENING_MODE.WAKE && hasWakeWord(text)) {
-      await activateAuris();
+      await activateAurel();
+      return;
+    }
+
+    if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
+      scheduleReplyTimeout();
+    }
+  }
+
+  async function handleSpeechResult(text) {
+    if (!text) {
+      return;
+    }
+
+    const commandText = String(text).trim();
+
+    if (listeningModeRef.current === LISTENING_MODE.WAKE && hasWakeWord(commandText)) {
+      await activateAurel();
       return;
     }
 
     if (listeningModeRef.current === LISTENING_MODE.CONVERSATION) {
       scheduleReplyTimeout();
 
-      if (!event.isFinal || processingSpeechRef.current) {
+      if (processingSpeechRef.current) {
         return;
       }
 
       processingSpeechRef.current = true;
       clearReplyTimeout();
       await stopVoiceListening();
-      setTranscript(text.trim());
+      setTranscript(commandText);
 
-      if (await executePhoneCommand(text.trim())) {
+      if (await executeVolumeCommand(commandText)) {
         processingSpeechRef.current = false;
         return;
       }
 
-      await sendTextToServer(text.trim(), () => startConversationListening());
+      if (await executeWhatsAppCallCommand(commandText)) {
+        processingSpeechRef.current = false;
+        return;
+      }
+
+      if (await executeWhatsAppCommand(commandText)) {
+        processingSpeechRef.current = false;
+        return;
+      }
+
+      if (await executePhoneCommand(commandText)) {
+        processingSpeechRef.current = false;
+        return;
+      }
+
+      await sendTextToServer(commandText, () => startConversationListening());
     }
   }
 
-  async function activateAuris() {
+  async function activateAurel() {
     if (processingSpeechRef.current) {
       return;
     }
@@ -741,15 +1001,15 @@ export default function App() {
     await stopVoiceListening();
     connectWebSocket();
     updateNotificationState('active');
-    setTranscript("Wake word detected: Auris");
-    setResponse('Yes?');
+    setTranscript("Wake word detected: Aurel");
+    setResponse('Ya?');
     setAssistantState(ASSISTANT_STATE.SPEAKING);
-    setStatusText('Speaking...');
-    setStateLabel('Speaking...');
-    setTimeout(() => {
+    setStatusText('Aurel Aktif - Silakan bicara');
+    setStateLabel('Aurel Aktif - Silakan bicara');
+    await speakText('Ya?', () => {
       processingSpeechRef.current = false;
-      startConversationListening('AURIS Active - Speak now');
-    }, 700);
+      startConversationListening('Aurel Aktif - Silakan bicara');
+    });
   }
 
   async function sendTextToServer(text, afterSpeech) {
@@ -791,6 +1051,56 @@ export default function App() {
     }
   }
 
+  async function getSpeakAudio(text) {
+    const result = await fetch(`${SERVER_URL}/speak`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text }),
+    });
+    const rawResponse = await result.text();
+    let data = {};
+
+    try {
+      data = rawResponse ? JSON.parse(rawResponse) : {};
+    } catch {
+      data = {};
+    }
+
+    if (!result.ok) {
+      throw new Error(data.error || `Server returned ${result.status}`);
+    }
+
+    return data.audio;
+  }
+
+  async function speakText(text, afterSpeech) {
+    try {
+      const audio = await getSpeakAudio(text);
+
+      if (audio) {
+        await playAudioResponse(audio, afterSpeech);
+        return;
+      }
+    } catch (error) {
+      console.warn('Failed to play Aurel speech cue:', error);
+    }
+
+    if (afterSpeech) {
+      afterSpeech();
+    }
+  }
+
+  async function playSleepSoundAndStartWakeMode() {
+    clearReplyTimeout();
+    await stopVoiceListening();
+    setStatusText("Mendengarkan 'Aurel'...");
+    setStateLabel("Ucapkan 'Aurel' untuk memulai");
+    updateNotificationState('idle');
+    await speakText('Tidur', () => startWakeWordListening());
+  }
+
   async function playResponseAudioOrSchedule(audio, nextResponse, afterSpeech) {
     if (audio) {
       try {
@@ -812,7 +1122,7 @@ export default function App() {
 
     const audioFile = new FileSystem.File(
       FileSystem.Paths.cache,
-      `auris-response-${Date.now()}.mp3`
+      `aurel-response-${Date.now()}.mp3`
     );
     audioFile.create({ overwrite: true });
     audioFile.write(base64Audio, { encoding: FileSystem.EncodingType.Base64 });
@@ -821,13 +1131,13 @@ export default function App() {
     const player = createAudioPlayer(audioFile.uri);
     audioPlayerRef.current = player;
     setAssistantState(ASSISTANT_STATE.SPEAKING);
-    setStatusText('Speaking...');
-    setStateLabel('Speaking...');
+    setStatusText('Aurel sedang berbicara...');
+    setStateLabel('Aurel sedang berbicara...');
     updateNotificationState('speaking');
 
     audioSubscriptionRef.current = player.addListener('playbackStatusUpdate', (status) => {
       if (status.error) {
-        console.error('AURIS audio playback error:', status.error);
+        console.error('Aurel audio playback error:', status.error);
         cleanupAudioPlayback();
         processingSpeechRef.current = false;
         if (afterSpeech) {
@@ -872,7 +1182,7 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0a0a0a" />
+      <StatusBar barStyle="dark-content" backgroundColor={AUREL_GREEN} />
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
@@ -910,16 +1220,16 @@ export default function App() {
 
         <View style={styles.content}>
           <View style={styles.transcriptBox}>
-            <Text style={styles.boxTitle}>You said</Text>
+            <Text style={styles.boxTitle}>KAMU BILANG</Text>
             <Text style={styles.boxText}>
-              {transcript || 'Your transcript will appear here.'}
+              {transcript || 'Transkripsi akan muncul di sini.'}
             </Text>
           </View>
 
           <View style={styles.responseBox}>
-            <Text style={styles.boxTitle}>AURIS response</Text>
+            <Text style={styles.boxTitle}>AUREL</Text>
             <Text style={styles.boxText}>
-              {response || 'AURIS will respond here.'}
+              {response || 'Aurel akan merespons di sini.'}
             </Text>
           </View>
 
@@ -979,10 +1289,10 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     height: 120,
     justifyContent: 'center',
-    shadowColor: '#000000',
+    shadowColor: AUREL_GREEN,
     shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.35,
-    shadowRadius: 24,
+    shadowOpacity: 0.45,
+    shadowRadius: 28,
     width: 120,
   },
   waveform: {
@@ -1025,8 +1335,8 @@ const styles = StyleSheet.create({
     padding: 18,
   },
   responseBox: {
-    backgroundColor: '#101c3a',
-    borderColor: '#1e3a8a',
+    backgroundColor: '#0f1f14',
+    borderColor: AUREL_GREEN,
     borderRadius: 20,
     borderWidth: 1,
     minHeight: 132,
@@ -1049,7 +1359,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     alignSelf: 'center',
     backgroundColor: '#15151c',
-    borderColor: '#2c2c36',
+    borderColor: AUREL_GREEN,
     borderRadius: 999,
     borderWidth: 1,
     flexDirection: 'row',

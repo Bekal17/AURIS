@@ -9,7 +9,8 @@ class AurisPackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
         return listOf(
             AurisModule(reactContext),
-            AurisPhoneModule(reactContext)
+            AurisPhoneModule(reactContext),
+            AurelSpeechModule(reactContext)
         )
     }
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {

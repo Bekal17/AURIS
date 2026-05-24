@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "Aurel",
+    "slug": "aurel",
     "version": "1.0.0",
     "icon": "./assets/logo.png",
     "splash": {
@@ -32,10 +32,9 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow AURIS to access your microphone for voice commands."
+          "microphonePermission": "Allow Aurel to access your microphone for voice commands."
         }
-      ],
-      "expo-speech-recognition"
+      ]
     ],
     "owner": "bekal"
   }

@@ -11,7 +11,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const TTS_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb';
-const AURIS_SYSTEM_PROMPT = `Kamu adalah AURIS, asisten suara hands-free untuk pengemudi,
+const AUREL_SYSTEM_PROMPT = `Kamu adalah Aurel, asisten suara hands-free untuk pengemudi,
 orang sibuk, dan penyandang disabilitas.
 Kamu berjalan di background HP Android pengguna.
 
@@ -37,8 +37,8 @@ Aturan:
 - Jika user bilang ya atau oke atau lanjut, eksekusi
 - Jika tidak mengerti perintah, minta clarifikasi singkat
 - Selalu konfirmasi sebelum melakukan aksi penting`;
-const TRANSCRIBE_SYSTEM_PROMPT = AURIS_SYSTEM_PROMPT;
-const SPEECH_ENGINE_SYSTEM_PROMPT = AURIS_SYSTEM_PROMPT;
+const TRANSCRIBE_SYSTEM_PROMPT = AUREL_SYSTEM_PROMPT;
+const SPEECH_ENGINE_SYSTEM_PROMPT = AUREL_SYSTEM_PROMPT;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -57,7 +57,7 @@ const anthropic = new Anthropic({
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ status: 'AURIS server running', port: PORT });
+  res.json({ status: 'Aurel server running', port: PORT });
 });
 
 app.get('/health', (req, res) => {
@@ -149,7 +149,7 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
     const transcription = await elevenlabs.speechToText.convert({
       file: {
         data: req.file.buffer,
-        filename: req.file.originalname || 'auris-recording.m4a',
+        filename: req.file.originalname || 'aurel-recording.m4a',
         contentType: req.file.mimetype || 'audio/m4a',
         contentLength: req.file.size,
       },
@@ -167,6 +167,26 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
   } catch (error) {
     console.error('Transcription error:', error);
     res.status(500).json({ error: 'Failed to transcribe audio.' });
+  }
+});
+
+app.post('/speak', async (req, res) => {
+  try {
+    const text = String(req.body?.text || '').trim();
+
+    if (!text) {
+      res.status(400).json({ error: 'Text is required.' });
+      return;
+    }
+
+    const audio = await getTextToSpeechAudio(text);
+    res.json({
+      audio,
+      audioFormat: 'mp3',
+    });
+  } catch (error) {
+    console.error('Speak error:', error);
+    res.status(500).json({ error: 'Failed to generate speech.' });
   }
 });
 
@@ -377,5 +397,5 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`AURIS server running on port ${PORT}`);
+  console.log(`Aurel server running on port ${PORT}`);
 });

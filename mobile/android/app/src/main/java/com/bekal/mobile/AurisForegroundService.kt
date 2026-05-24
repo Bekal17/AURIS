@@ -131,10 +131,10 @@ class AurisForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "AURIS Voice Assistant",
+                "Aurel Voice Assistant",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "AURIS is listening in background"
+                description = "Aurel is listening in background"
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
@@ -202,20 +202,20 @@ class AurisForegroundService : Service() {
     private fun buildNotification(): Notification {
         val openAppPendingIntent = createOpenAppPendingIntent()
         val notificationText = when (notificationState) {
-            STATE_IDLE -> "Mendengarkan... Ucapkan 'Auris'"
+            STATE_IDLE -> "Ucapkan 'Aurel' untuk memulai"
             STATE_LISTENING -> "Mendengarkan kamu..."
-            STATE_SPEAKING -> "AURIS sedang berbicara..."
-            STATE_ACTIVE -> "AURIS aktif"
-            else -> "AURIS aktif"
+            STATE_SPEAKING -> "Aurel sedang berbicara..."
+            STATE_ACTIVE -> "Aurel aktif"
+            else -> "Aurel aktif"
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("AURIS Aktif")
+            .setContentTitle("Aurel Aktif")
             .setContentText(notificationText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.auris_logo))
             .setContentIntent(openAppPendingIntent)
-            .addAction(android.R.drawable.ic_menu_view, "Buka AURIS", openAppPendingIntent)
+            .addAction(android.R.drawable.ic_menu_view, "Buka Aurel", openAppPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(true)
             .build()

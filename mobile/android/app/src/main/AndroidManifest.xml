@@ -41,7 +41,7 @@
     <service
       android:name=".AurisAccessibilityService"
       android:exported="true"
-      android:label="AURIS Voice Assistant"
+      android:label="Aurel Voice Assistant"
       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
       <intent-filter>
         <action android:name="android.accessibilityservice.AccessibilityService"/>

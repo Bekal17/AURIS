@@ -1,4 +1,4 @@
 <resources>
-  <string name="app_name">mobile</string>
-  <string name="accessibility_service_description">AURIS reads WhatsApp notifications and helps you reply hands-free.</string>
+  <string name="app_name">Aurel</string>
+  <string name="accessibility_service_description">Aurel reads WhatsApp notifications and helps you reply hands-free.</string>
 </resources>
