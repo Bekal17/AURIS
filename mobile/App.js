@@ -95,6 +95,7 @@ export default function App() {
   const startupFlowRunningRef = useRef(false);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
+  const floatingServiceTimeoutRef = useRef(null);
   const wsRef = useRef(null);
   const pulseScale = useRef(new Animated.Value(1)).current;
   const pulseOpacity = useRef(new Animated.Value(0.35)).current;
@@ -157,6 +158,8 @@ export default function App() {
     const appStateSubscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         runStartupPermissionFlow();
+      } else if (nextState === 'background') {
+        startFloatingServiceWithDebug('app-background');
       }
     });
 
@@ -164,6 +167,7 @@ export default function App() {
       appStateSubscription.remove();
       clearReplyTimeout();
       clearSpeakingTimer();
+      clearFloatingServiceTimeout();
       cleanupAudioPlayback();
       closeWebSocket();
       AurisModule?.stopForegroundService?.();
@@ -265,6 +269,28 @@ export default function App() {
     }
   }
 
+  function clearFloatingServiceTimeout() {
+    if (floatingServiceTimeoutRef.current) {
+      clearTimeout(floatingServiceTimeoutRef.current);
+      floatingServiceTimeoutRef.current = null;
+    }
+  }
+
+  function startFloatingServiceWithDebug(source, delayMs = 0) {
+    clearFloatingServiceTimeout();
+
+    floatingServiceTimeoutRef.current = setTimeout(() => {
+      floatingServiceTimeoutRef.current = null;
+      console.log(`AURIS startFloatingService called from ${source}`);
+
+      try {
+        AurisModule?.startFloatingService?.();
+      } catch (error) {
+        console.warn('Failed to start AURIS floating service:', error);
+      }
+    }, delayMs);
+  }
+
   function updateFloatingState(state) {
     try {
       AurisModule?.updateFloatingState?.(state);
@@ -343,6 +369,8 @@ export default function App() {
         return;
       }
 
+      startFloatingServiceWithDebug('startup-after-overlay', 1000);
+
       const batteryOptimizationExempted = await ensureBatteryOptimizationExemption();
 
       if (!batteryOptimizationExempted) {
@@ -351,7 +379,6 @@ export default function App() {
 
       try {
         AurisModule?.startForegroundService?.();
-        AurisModule?.startFloatingService?.();
       } catch (error) {
         console.warn('Failed to start AURIS background services:', error);
       }
@@ -397,12 +424,12 @@ export default function App() {
         'Enable AURIS Accessibility',
         'Turn on AURIS in Accessibility Settings so it can detect WhatsApp messages.',
         [
-          { text: 'Not Now', style: 'cancel' },
           {
             text: 'Open Settings',
             onPress: () => AurisModule.openAccessibilitySettings?.(),
           },
-        ]
+        ],
+        { cancelable: false }
       );
       return false;
     } catch (error) {

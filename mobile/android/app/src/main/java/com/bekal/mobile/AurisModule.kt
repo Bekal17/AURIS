@@ -2,6 +2,7 @@ package com.bekal.mobile
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import com.facebook.react.bridge.*
@@ -16,11 +17,15 @@ class AurisModule(private val reactContext: ReactApplicationContext) : ReactCont
 
     @ReactMethod
     fun isAccessibilityEnabled(promise: Promise) {
-        val enabled = android.provider.Settings.Secure.getString(
+        val enabledServices = Settings.Secure.getString(
             reactContext.contentResolver,
-            android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        )?.contains("com.bekal.mobile/.AurisAccessibilityService") ?: false
-        promise.resolve(enabled)
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: ""
+
+        val isEnabled = enabledServices.contains(
+            reactContext.packageName, ignoreCase = true
+        )
+        promise.resolve(isEnabled)
     }
 
     @ReactMethod
@@ -70,8 +75,15 @@ class AurisModule(private val reactContext: ReactApplicationContext) : ReactCont
 
     @ReactMethod
     fun startFloatingService() {
-        val intent = android.content.Intent(reactContext, AurisFloatingService::class.java)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(reactContext)) {
+                return
+            }
+        }
+
+        val intent = Intent(reactContext, AurisFloatingService::class.java)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             reactContext.startForegroundService(intent)
         } else {
             reactContext.startService(intent)
