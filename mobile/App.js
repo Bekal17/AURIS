@@ -97,7 +97,6 @@ export default function App() {
   const startupFlowRunningRef = useRef(false);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
-  const floatingServiceTimeoutRef = useRef(null);
   const wsRef = useRef(null);
   const pulseScale = useRef(new Animated.Value(1)).current;
   const pulseOpacity = useRef(new Animated.Value(0.35)).current;
@@ -160,8 +159,6 @@ export default function App() {
     const appStateSubscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         runStartupPermissionFlow();
-      } else if (nextState === 'background') {
-        startFloatingServiceWithDebug('app-background');
       }
     });
 
@@ -169,7 +166,6 @@ export default function App() {
       appStateSubscription.remove();
       clearReplyTimeout();
       clearSpeakingTimer();
-      clearFloatingServiceTimeout();
       cleanupAudioPlayback();
       closeWebSocket();
       AurisModule?.stopForegroundService?.();
@@ -271,33 +267,11 @@ export default function App() {
     }
   }
 
-  function clearFloatingServiceTimeout() {
-    if (floatingServiceTimeoutRef.current) {
-      clearTimeout(floatingServiceTimeoutRef.current);
-      floatingServiceTimeoutRef.current = null;
-    }
-  }
-
-  function startFloatingServiceWithDebug(source, delayMs = 0) {
-    clearFloatingServiceTimeout();
-
-    floatingServiceTimeoutRef.current = setTimeout(() => {
-      floatingServiceTimeoutRef.current = null;
-      console.log(`AURIS startFloatingService called from ${source}`);
-
-      try {
-        AurisModule?.startFloatingService?.();
-      } catch (error) {
-        console.warn('Failed to start AURIS floating service:', error);
-      }
-    }, delayMs);
-  }
-
-  function updateFloatingState(state) {
+  function updateNotificationState(state) {
     try {
-      AurisModule?.updateFloatingState?.(state);
+      AurisModule?.updateNotificationState?.(state);
     } catch (error) {
-      console.warn('Failed to update AURIS floating state:', error);
+      console.warn('Failed to update AURIS notification state:', error);
     }
   }
 
@@ -365,14 +339,6 @@ export default function App() {
         return;
       }
 
-      const overlayGranted = await ensureOverlayPermission();
-
-      if (!overlayGranted) {
-        return;
-      }
-
-      startFloatingServiceWithDebug('startup-after-overlay', 1000);
-
       const batteryOptimizationExempted = await ensureBatteryOptimizationExemption();
 
       if (!batteryOptimizationExempted) {
@@ -436,36 +402,6 @@ export default function App() {
       return false;
     } catch (error) {
       console.warn('Failed to check AURIS accessibility status:', error);
-      return false;
-    }
-  }
-
-  async function ensureOverlayPermission() {
-    if (!AurisModule?.isOverlayPermissionGranted) {
-      return true;
-    }
-
-    try {
-      const granted = await AurisModule.isOverlayPermissionGranted();
-
-      if (granted) {
-        return true;
-      }
-
-      Alert.alert(
-        'Enable Overlay Permission',
-        'Allow AURIS to appear over other apps so it can assist while you drive.',
-        [
-          { text: 'Not Now', style: 'cancel' },
-          {
-            text: 'Open Settings',
-            onPress: () => AurisModule.requestOverlayPermission?.(),
-          },
-        ]
-      );
-      return false;
-    } catch (error) {
-      console.warn('Failed to check AURIS overlay permission:', error);
       return false;
     }
   }
@@ -621,7 +557,7 @@ export default function App() {
     setAssistantState(ASSISTANT_STATE.WAKE);
     setStatusText("Listening for 'Auris'...");
     setStateLabel("Say 'Auris' to activate");
-    updateFloatingState('idle');
+    updateNotificationState('idle');
     await startVoiceRecognition(LISTENING_MODE.WAKE);
   }
 
@@ -630,7 +566,7 @@ export default function App() {
     setAssistantState(ASSISTANT_STATE.LISTENING);
     setStatusText(nextStatus);
     setStateLabel('Listening...');
-    updateFloatingState('listening');
+    updateNotificationState('listening');
     await startVoiceRecognition(LISTENING_MODE.CONVERSATION);
     scheduleReplyTimeout();
   }
@@ -804,7 +740,7 @@ export default function App() {
     processingSpeechRef.current = true;
     await stopVoiceListening();
     connectWebSocket();
-    updateFloatingState('active');
+    updateNotificationState('active');
     setTranscript("Wake word detected: Auris");
     setResponse('Yes?');
     setAssistantState(ASSISTANT_STATE.SPEAKING);
@@ -866,7 +802,7 @@ export default function App() {
     }
 
     setAssistantState(ASSISTANT_STATE.SPEAKING);
-    updateFloatingState('speaking');
+    updateNotificationState('speaking');
     scheduleIdleState(nextResponse, afterSpeech);
   }
 
@@ -887,7 +823,7 @@ export default function App() {
     setAssistantState(ASSISTANT_STATE.SPEAKING);
     setStatusText('Speaking...');
     setStateLabel('Speaking...');
-    updateFloatingState('speaking');
+    updateNotificationState('speaking');
 
     audioSubscriptionRef.current = player.addListener('playbackStatusUpdate', (status) => {
       if (status.error) {

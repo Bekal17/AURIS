@@ -1,11 +1,16 @@
 package com.bekal.mobile
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.view.Gravity
 import android.view.View
@@ -25,25 +30,38 @@ class AurisForegroundService : Service() {
         const val CHANNEL_ID = "auris_channel"
         const val NOTIFICATION_ID = 1
         const val ACTION_KEEP_SCREEN_ON = "AURIS_KEEP_SCREEN_ON"
+        const val ACTION_NOTIFICATION_STATE = "AURIS_NOTIFICATION_STATE"
+        const val EXTRA_NOTIFICATION_STATE = "state"
+        const val STATE_IDLE = "idle"
+        const val STATE_LISTENING = "listening"
+        const val STATE_SPEAKING = "speaking"
+        const val STATE_ACTIVE = "active"
         var isRunning = false
     }
+
+    private var notificationState = STATE_IDLE
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
                     ensureWakeLock()
-                    sendBroadcast(Intent("AURIS_STATE_UPDATE").putExtra("state", "listening"))
+                    updateNotificationState(STATE_LISTENING)
                     sendBroadcast(Intent("AURIS_RESTART_LISTENING"))
                     AurisEventEmitter.sendEvent("onRestartListening", "screen_off")
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     ensureWakeLock()
-                    sendBroadcast(Intent("AURIS_STATE_UPDATE").putExtra("state", "active"))
+                    updateNotificationState(STATE_ACTIVE)
                     AurisEventEmitter.sendEvent("onScreenOn", "screen_on")
                 }
                 ACTION_KEEP_SCREEN_ON -> {
                     setKeepScreenOn(intent.getBooleanExtra("enabled", false))
+                }
+                ACTION_NOTIFICATION_STATE -> {
+                    updateNotificationState(
+                        intent.getStringExtra(EXTRA_NOTIFICATION_STATE) ?: STATE_IDLE
+                    )
                 }
             }
         }
@@ -61,6 +79,9 @@ class AurisForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_NOTIFICATION_STATE) {
+            updateNotificationState(intent.getStringExtra(EXTRA_NOTIFICATION_STATE) ?: STATE_IDLE)
+        }
         return START_STICKY
     }
 
@@ -96,6 +117,7 @@ class AurisForegroundService : Service() {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(ACTION_KEEP_SCREEN_ON)
+            addAction(ACTION_NOTIFICATION_STATE)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -110,7 +132,7 @@ class AurisForegroundService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "AURIS Voice Assistant",
-                NotificationManager.IMPORTANCE_HIGH
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "AURIS is listening in background"
                 setShowBadge(false)
@@ -131,6 +153,12 @@ class AurisForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun updateNotificationState(state: String) {
+        notificationState = state
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun setKeepScreenOn(enabled: Boolean) {
@@ -172,12 +200,37 @@ class AurisForegroundService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val openAppPendingIntent = createOpenAppPendingIntent()
+        val notificationText = when (notificationState) {
+            STATE_IDLE -> "Mendengarkan... Ucapkan 'Auris'"
+            STATE_LISTENING -> "Mendengarkan kamu..."
+            STATE_SPEAKING -> "AURIS sedang berbicara..."
+            STATE_ACTIVE -> "AURIS aktif"
+            else -> "AURIS aktif"
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("AURIS is active")
-            .setContentText("AURIS aktif - Mendengarkan di background")
+            .setContentTitle("AURIS Aktif")
+            .setContentText(notificationText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.auris_logo))
+            .setContentIntent(openAppPendingIntent)
+            .addAction(android.R.drawable.ic_menu_view, "Buka AURIS", openAppPendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOngoing(true)
             .build()
+    }
+
+    private fun createOpenAppPendingIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                0
+            }
+        return PendingIntent.getActivity(this, 0, intent, flags)
     }
 }
