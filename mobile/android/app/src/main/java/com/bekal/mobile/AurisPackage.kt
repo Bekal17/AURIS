@@ -11,7 +11,8 @@ class AurisPackage : ReactPackage {
             AurisModule(reactContext),
             AurisPhoneModule(reactContext),
             AurelSpeechModule(reactContext),
-            AurelWakeWordModule(reactContext)
+            AurelWakeWordModule(reactContext),
+            AurelContactsModule(reactContext)
         )
     }
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {

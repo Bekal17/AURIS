@@ -2,10 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   AppState,
-  Animated,
-  Easing,
   DeviceEventEmitter,
   Image,
+  Linking,
   NativeModules,
   PermissionsAndroid,
   ScrollView,
@@ -16,6 +15,7 @@ import {
 } from 'react-native';
 import { createAudioPlayer } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
+import AurelFace from './src/AurelFace';
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
 const WS_URL = 'wss://auris-production-a715.up.railway.app/ws';
@@ -61,6 +61,7 @@ const LISTENING_MODE = {
 const AUREL_GREEN = '#00FF41';
 const STOP_COMMANDS = ['stop', 'berhenti', 'selesai'];
 const CONVERSATION_SILENCE_TIMEOUT_MS = 10000;
+const WHATSAPP_UNAVAILABLE_MESSAGE = 'WhatsApp tidak terinstall di HP ini.';
 
 const STATE_CONFIG = {
   [ASSISTANT_STATE.WAKE]: {
@@ -89,18 +90,6 @@ const STATE_CONFIG = {
   },
 };
 
-function Waveform({ color }) {
-  return (
-    <View style={styles.waveform}>
-      <View style={[styles.waveDot, styles.waveDotSmall, { backgroundColor: color }]} />
-      <View style={[styles.waveDot, styles.waveDotMedium, { backgroundColor: color }]} />
-      <View style={[styles.waveDot, styles.waveDotLarge, { backgroundColor: color }]} />
-      <View style={[styles.waveDot, styles.waveDotMedium, { backgroundColor: color }]} />
-      <View style={[styles.waveDot, styles.waveDotSmall, { backgroundColor: color }]} />
-    </View>
-  );
-}
-
 export default function App() {
   console.log('Aurel App: component mounted');
 
@@ -121,14 +110,13 @@ export default function App() {
   const pendingIncomingCallRef = useRef(null);
   const pendingWhatsAppCallRef = useRef(null);
   const pendingWhatsAppReplyRef = useRef(null);
+  const pendingAurelIntentRef = useRef(null);
   const startupFlowCompleteRef = useRef(false);
   const startupFlowRunningRef = useRef(false);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
   const conversationSilenceDeadlineRef = useRef(null);
   const wsRef = useRef(null);
-  const pulseScale = useRef(new Animated.Value(1)).current;
-  const pulseOpacity = useRef(new Animated.Value(0.35)).current;
 
   const stateConfig = STATE_CONFIG[assistantState];
 
@@ -139,54 +127,6 @@ export default function App() {
       console.error('useEffect error:', e.message);
     }
   }, [assistantState]);
-
-  useEffect(() => {
-    try {
-      if (!stateConfig.pulsing) {
-        pulseScale.setValue(1);
-        pulseOpacity.setValue(0.35);
-        return undefined;
-      }
-
-      const animation = Animated.loop(
-        Animated.parallel([
-          Animated.sequence([
-            Animated.timing(pulseScale, {
-              toValue: 1.28,
-              duration: 850,
-              easing: Easing.out(Easing.ease),
-              useNativeDriver: true,
-            }),
-            Animated.timing(pulseScale, {
-              toValue: 1,
-              duration: 850,
-              easing: Easing.in(Easing.ease),
-              useNativeDriver: true,
-            }),
-          ]),
-          Animated.sequence([
-            Animated.timing(pulseOpacity, {
-              toValue: 0.08,
-              duration: 850,
-              useNativeDriver: true,
-            }),
-            Animated.timing(pulseOpacity, {
-              toValue: 0.35,
-              duration: 850,
-              useNativeDriver: true,
-            }),
-          ]),
-        ])
-      );
-
-      animation.start();
-
-      return () => animation.stop();
-    } catch (e) {
-      console.error('useEffect error:', e.message);
-      return undefined;
-    }
-  }, [pulseOpacity, pulseScale, stateConfig.pulsing]);
 
   useEffect(() => {
     try {
@@ -424,6 +364,8 @@ export default function App() {
         return;
       }
 
+      await requestContactsPermission();
+
       try {
         callNativeModule('AurisModule', 'startForegroundService');
       } catch (error) {
@@ -454,6 +396,35 @@ export default function App() {
       return granted;
     } catch (error) {
       console.warn('Audio recording permission request failed:', error);
+      return false;
+    }
+  }
+
+  async function requestContactsPermission() {
+    try {
+      const existingPermission = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.READ_CONTACTS
+      );
+
+      if (existingPermission) {
+        return true;
+      }
+
+      const permission = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.READ_CONTACTS
+      );
+      const granted = permission === PermissionsAndroid.RESULTS.GRANTED;
+
+      if (!granted) {
+        Alert.alert(
+          'Izin Kontak Diperlukan',
+          'Fitur kirim & telepon WhatsApp via nama tidak tersedia. Izin kontak ditolak.'
+        );
+      }
+
+      return granted;
+    } catch (error) {
+      console.warn('Contacts permission request failed:', error);
       return false;
     }
   }
@@ -675,6 +646,7 @@ export default function App() {
   async function startWakeWordListening() {
     clearReplyTimeout();
     conversationSilenceDeadlineRef.current = null;
+    pendingAurelIntentRef.current = null;
     await stopVoiceListening();
     setAssistantState(ASSISTANT_STATE.WAKE);
     setStatusText("Mendengarkan 'Aurel'...");
@@ -1039,34 +1011,18 @@ export default function App() {
 
       if (isStopCommand(commandText)) {
         setResponse('Aurel berhenti.');
+        pendingAurelIntentRef.current = null;
         processingSpeechRef.current = false;
         await startWakeWordListening();
         return;
       }
 
-      if (await executeVolumeCommand(commandText)) {
-        processingSpeechRef.current = false;
+      if (pendingAurelIntentRef.current) {
+        await handlePendingAurelIntent(commandText);
         return;
       }
 
-      if (await executeWhatsAppCallCommand(commandText)) {
-        processingSpeechRef.current = false;
-        return;
-      }
-
-      if (await executeWhatsAppCommand(commandText)) {
-        processingSpeechRef.current = false;
-        return;
-      }
-
-      if (await executePhoneCommand(commandText)) {
-        processingSpeechRef.current = false;
-        return;
-      }
-
-      const nextResponse = data.response || data.reply || data.answer || 'Tidak ada respons.';
-      setResponse(nextResponse);
-      await playResponseAudioOrSchedule(data.audio, nextResponse, () => startConversationListening());
+      await handleClaudeIntentData(commandText, data, () => startConversationListening());
     } catch (error) {
       console.error('Failed to process recorded command:', error);
       setResponse(`Server error: ${error.message}`);
@@ -1090,6 +1046,227 @@ export default function App() {
     }
 
     return data;
+  }
+
+  async function handleClaudeResponse(transcript, afterIntent) {
+    const result = await fetch(`${SERVER_URL}/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text: transcript }),
+    });
+    const data = await result.json();
+
+    if (!result.ok) {
+      throw new Error(data.error || data.response || `Server returned ${result.status}`);
+    }
+
+    return handleClaudeIntentData(transcript, data, afterIntent);
+  }
+
+  async function handleClaudeIntentData(transcriptText, data, afterIntent) {
+    let intent;
+
+    try {
+      intent = JSON.parse(data.response);
+    } catch {
+      intent = { action: 'speak', speak: data.speak || data.response };
+    }
+
+    const speak = intent.speak || data.speak || data.response || 'Baik.';
+    setTranscript(transcriptText);
+    setResponse(speak);
+
+    const runAction = async () => {
+      const shouldContinue = await executeClaudeIntent(intent);
+      if (shouldContinue && afterIntent) {
+        afterIntent();
+      }
+    };
+
+    if (data.audio) {
+      await playResponseAudioOrSchedule(data.audio, speak, runAction);
+      return;
+    }
+
+    await speakText(speak, runAction);
+  }
+
+  async function executeClaudeIntent(intent) {
+    switch (intent.action) {
+      case 'send_wa':
+        if (!intent.message) {
+          startFollowUpRecording('send_wa_message', intent.contact);
+          return false;
+        }
+        return sendWhatsAppByContact(intent.contact, intent.message);
+      case 'call_wa':
+        await callWhatsAppContact(intent.contact, intent.option);
+        return true;
+      case 'reply_wa':
+        if (hasNativeMethod('AurisModule', 'replyToWhatsApp')) {
+          await callNativeModule('AurisModule', 'replyToWhatsApp', intent.message || '');
+        }
+        return true;
+      case 'answer_call':
+        if (hasNativeMethod('AurisPhoneModule', 'answerWhatsAppCall')) {
+          await callNativeModule('AurisPhoneModule', 'answerWhatsAppCall');
+          if (intent.option === 'loudspeaker') {
+            setTimeout(() => {
+              callNativeModule('AurisPhoneModule', 'setSpeakerOn', true);
+            }, 2000);
+          }
+        }
+        return true;
+      case 'reject_call':
+        if (hasNativeMethod('AurisPhoneModule', 'rejectWhatsAppCall')) {
+          await callNativeModule('AurisPhoneModule', 'rejectWhatsAppCall');
+        }
+        return true;
+      case 'volume':
+        if (hasNativeMethod('AurisPhoneModule', 'setVolume')) {
+          await callNativeModule('AurisPhoneModule', 'setVolume', intent.direction);
+        }
+        return true;
+      case 'mute':
+        if (hasNativeMethod('AurisPhoneModule', 'setMute')) {
+          await callNativeModule('AurisPhoneModule', 'setMute', Boolean(intent.enabled));
+        }
+        return true;
+      case 'speak':
+      default:
+        return true;
+    }
+  }
+
+  function startFollowUpRecording(type, contact) {
+    pendingAurelIntentRef.current = { type, contact };
+    startConversationListening('Mendengarkan isi pesan WhatsApp...', false);
+  }
+
+  async function handlePendingAurelIntent(commandText) {
+    const pendingIntent = pendingAurelIntentRef.current;
+    pendingAurelIntentRef.current = null;
+
+    if (pendingIntent?.type === 'send_wa_message') {
+      await sendWhatsAppByContact(pendingIntent.contact, commandText);
+      return;
+    }
+
+    if (pendingIntent?.type === 'confirm_send_wa') {
+      if (isConfirmSendCommand(commandText)) {
+        if (!(await ensureWhatsAppAvailable())) {
+          return;
+        }
+
+        await Linking.openURL(
+          `whatsapp://send?phone=${pendingIntent.phone}&text=${encodeURIComponent(pendingIntent.message)}`
+        );
+        setResponse(`Oke, membuka WhatsApp untuk kirim pesan ke ${pendingIntent.contact}`);
+        processingSpeechRef.current = false;
+        await startConversationListening();
+        return;
+      }
+
+      if (isCancelSendCommand(commandText)) {
+        setResponse('Dibatalkan');
+        processingSpeechRef.current = false;
+        await speakText('Dibatalkan', () => startWakeWordListening());
+        return;
+      }
+
+      pendingAurelIntentRef.current = pendingIntent;
+      await speakText('Konfirmasi belum jelas. Bilang ya untuk kirim atau batal untuk membatalkan.', () =>
+        startConversationListening('Mendengarkan konfirmasi WhatsApp...', false)
+      );
+      return;
+    }
+
+    processingSpeechRef.current = false;
+    await startConversationListening();
+  }
+
+  async function findFirstContact(contactName) {
+    if (!contactName || !hasNativeMethod('AurelContactsModule', 'findContact')) {
+      return null;
+    }
+
+    const contacts = await callNativeModule('AurelContactsModule', 'findContact', contactName);
+    return contacts?.length > 0 ? contacts[0] : null;
+  }
+
+  function cleanPhoneNumber(phone) {
+    return String(phone || '').replace(/[^0-9+]/g, '');
+  }
+
+  function isConfirmSendCommand(text) {
+    const command = String(text || '').toLowerCase();
+    return command.includes('ya') || command.includes('oke') || command.includes('kirim');
+  }
+
+  function isCancelSendCommand(text) {
+    const command = String(text || '').toLowerCase();
+    return command.includes('batal') || command.includes('tidak') || command.includes('cancel');
+  }
+
+  async function ensureWhatsAppAvailable() {
+    const canOpen = await Linking.canOpenURL('whatsapp://send?phone=1');
+
+    if (!canOpen) {
+      setResponse(WHATSAPP_UNAVAILABLE_MESSAGE);
+      await speakText(WHATSAPP_UNAVAILABLE_MESSAGE);
+      return false;
+    }
+
+    return true;
+  }
+
+  async function sendWhatsAppByContact(contactName, message) {
+    const contact = await findFirstContact(contactName);
+    if (!contact) {
+      setResponse(`Kontak ${contactName} tidak ditemukan.`);
+      return true;
+    }
+
+    if (!(await ensureWhatsAppAvailable())) {
+      return true;
+    }
+
+    const cleanPhone = cleanPhoneNumber(contact.phone);
+    const confirmationPrompt = `Mau kirim '${message}' ke ${contact.name}? Bilang ya atau batal.`;
+    pendingAurelIntentRef.current = {
+      type: 'confirm_send_wa',
+      contact: contact.name || contactName,
+      phone: cleanPhone,
+      message,
+    };
+    setResponse(confirmationPrompt);
+    await speakText(confirmationPrompt, () =>
+      startConversationListening('Mendengarkan konfirmasi WhatsApp...', false)
+    );
+    return false;
+  }
+
+  async function callWhatsAppContact(contactName, option) {
+    const contact = await findFirstContact(contactName);
+    if (!contact) {
+      setResponse(`Kontak ${contactName} tidak ditemukan.`);
+      return;
+    }
+
+    if (!(await ensureWhatsAppAvailable())) {
+      return;
+    }
+
+    const cleanPhone = cleanPhoneNumber(contact.phone);
+    await Linking.openURL(`whatsapp://call?phone=${cleanPhone}`);
+
+    if (option === 'loudspeaker') {
+      setTimeout(() => {
+        callNativeModule('AurisPhoneModule', 'setSpeakerOn', true);
+      }, 3000);
+    }
   }
 
   async function activateAurel() {
@@ -1118,32 +1295,7 @@ export default function App() {
       clearSpeakingTimer();
       setResponse('');
       setAssistantState(ASSISTANT_STATE.THINKING);
-
-      const result = await fetch(`${SERVER_URL}/transcribe`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text }),
-      });
-      const rawResponse = await result.text();
-      let data = {};
-
-      try {
-        data = rawResponse ? JSON.parse(rawResponse) : {};
-      } catch {
-        data = { response: rawResponse };
-      }
-
-      if (!result.ok) {
-        throw new Error(data.error || data.response || `Server returned ${result.status}`);
-      }
-
-      const nextResponse =
-        data.response || data.reply || data.answer || rawResponse || 'No response returned.';
-
-      setResponse(nextResponse);
-      await playResponseAudioOrSchedule(data.audio, nextResponse, afterSpeech);
+      await handleClaudeResponse(text, afterSpeech);
     } catch (error) {
       console.error('Failed to process WhatsApp message:', error);
       setResponse(`Server error: ${error.message}`);
@@ -1293,29 +1445,10 @@ export default function App() {
       >
         <View style={styles.header}>
           <Image source={require('./assets/logo.png')} style={styles.logo} />
-          <Text style={styles.tagline}>Hands-free AI Assistant</Text>
         </View>
 
         <View style={styles.centerStage}>
-          <View style={styles.waveWrap}>
-            {stateConfig.pulsing ? (
-              <Animated.View
-                style={[
-                  styles.pulseCircle,
-                  {
-                    backgroundColor: stateConfig.color,
-                    opacity: pulseOpacity,
-                    transform: [{ scale: pulseScale }],
-                  },
-                ]}
-              />
-            ) : null}
-
-            <View style={[styles.waveCard, { borderColor: stateConfig.color }]}>
-              <Waveform color={stateConfig.color} />
-            </View>
-          </View>
-
+          <AurelFace state={assistantState} />
           <Text style={[styles.stateLabel, { color: stateConfig.color }]}>
             {stateLabel}
           </Text>
@@ -1357,68 +1490,21 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: 'center',
-    paddingTop: 34,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    position: 'absolute',
+    right: 16,
+    top: 40,
+    zIndex: 10,
   },
   logo: {
-    height: 80,
-    width: 80,
-  },
-  tagline: {
-    color: '#9ca3af',
-    fontSize: 16,
-    marginTop: 8,
+    height: 36,
+    width: 36,
   },
   centerStage: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 70,
-  },
-  waveWrap: {
-    alignItems: 'center',
-    height: 148,
-    justifyContent: 'center',
-    width: 148,
-  },
-  pulseCircle: {
-    borderRadius: 74,
-    height: 148,
-    position: 'absolute',
-    width: 148,
-  },
-  waveCard: {
-    alignItems: 'center',
-    backgroundColor: '#111118',
-    borderRadius: 60,
-    borderWidth: 3,
-    height: 120,
-    justifyContent: 'center',
-    shadowColor: AUREL_GREEN,
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.45,
-    shadowRadius: 28,
-    width: 120,
-  },
-  waveform: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 7,
-    height: 72,
-    justifyContent: 'center',
-    width: 82,
-  },
-  waveDot: {
-    borderRadius: 999,
-    opacity: 0.9,
-    width: 8,
-  },
-  waveDotSmall: {
-    height: 26,
-  },
-  waveDotMedium: {
-    height: 44,
-  },
-  waveDotLarge: {
-    height: 64,
+    marginTop: 96,
   },
   stateLabel: {
     fontSize: 18,

@@ -66,12 +66,8 @@ class AurisModule(private val reactContext: ReactApplicationContext) : ReactCont
 
     @ReactMethod
     fun replyToWhatsApp(message: String, promise: Promise) {
-        val sent = AurisAccessibilityService.replyToLatestNotification(message)
-        if (sent) {
-            promise.resolve(true)
-        } else {
-            promise.reject("NO_WHATSAPP_REPLY_TARGET", "WhatsApp reply field is not available.")
-        }
+        AurisAccessibilityService.instance?.replyViaNotificationAction(message)
+        promise.resolve(true)
     }
 
     @ReactMethod

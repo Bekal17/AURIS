@@ -20,5 +20,15 @@ allprojects {
   }
 }
 
+subprojects {
+  buildscript {
+    repositories {
+      google()
+      mavenCentral()
+      gradlePluginPortal()
+    }
+  }
+}
+
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"

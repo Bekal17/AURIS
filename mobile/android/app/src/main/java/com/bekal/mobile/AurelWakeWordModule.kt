@@ -88,7 +88,7 @@ class AurelWakeWordModule(private val reactContext: ReactApplicationContext) : R
                                     sendEvent("onWakeWordDetected", "AUREL:${result.aurelConfidence}")
                                 }
                                 result.stopConfidence > 0.85f -> {
-                                    sendEvent("onWakeWordDetected", "STOP:${result.stopConfidence}")
+                                    sendEvent("onWakeWordDetected", "STOP")
                                 }
                             }
                         }
