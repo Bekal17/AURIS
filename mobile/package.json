@@ -7,10 +7,10 @@
     "expo": "~56.0.3",
     "expo-audio": "~56.0.9",
     "expo-file-system": "~56.0.7",
+    "expo-gl": "~56.0.5",
     "expo-status-bar": "~56.0.4",
     "react": "19.2.3",
     "react-native": "0.85.3",
-    "react-native-webview": "^13.16.1",
     "ws": "^8.20.1"
   },
   "publishConfig": {
