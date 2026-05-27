@@ -10,7 +10,8 @@ class AurisPackage : ReactPackage {
         return listOf(
             AurisModule(reactContext),
             AurisPhoneModule(reactContext),
-            AurelSpeechModule(reactContext)
+            AurelSpeechModule(reactContext),
+            AurelWakeWordModule(reactContext)
         )
     }
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {

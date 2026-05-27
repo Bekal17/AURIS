@@ -1,0 +1,3 @@
+0 AUREL
+1 Background Noise
+2 STOP RECORD/MUTE

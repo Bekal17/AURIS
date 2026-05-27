@@ -59,7 +59,8 @@ const LISTENING_MODE = {
 };
 
 const AUREL_GREEN = '#00FF41';
-const WAKE_WORDS = ['aurel', 'hei aurel', 'hey aurel', 'orel', 'el'];
+const STOP_COMMANDS = ['stop', 'berhenti', 'selesai'];
+const CONVERSATION_SILENCE_TIMEOUT_MS = 10000;
 
 const STATE_CONFIG = {
   [ASSISTANT_STATE.WAKE]: {
@@ -124,6 +125,7 @@ export default function App() {
   const startupFlowRunningRef = useRef(false);
   const replyTimeoutRef = useRef(null);
   const speakingTimeoutRef = useRef(null);
+  const conversationSilenceDeadlineRef = useRef(null);
   const wsRef = useRef(null);
   const pulseScale = useRef(new Animated.Value(1)).current;
   const pulseOpacity = useRef(new Animated.Value(0.35)).current;
@@ -202,6 +204,7 @@ export default function App() {
         cleanupAudioPlayback();
         closeWebSocket();
         callNativeModule('AurisModule', 'stopForegroundService');
+        callNativeModule('AurelWakeWordModule', 'stopWakeWordListening');
         callNativeModule('AurelSpeechModule', 'destroyRecognizer');
       };
     } catch (e) {
@@ -258,6 +261,10 @@ export default function App() {
         'onRecordingComplete',
         handleRecordingComplete
       );
+      const wakeWordSubscription = DeviceEventEmitter.addListener(
+        'onWakeWordDetected',
+        handleWakeWordDetected
+      );
 
       return () => {
         whatsAppSubscription.remove();
@@ -265,6 +272,7 @@ export default function App() {
         whatsAppCallSubscription.remove();
         audioDeviceSubscription.remove();
         recordingCompleteSubscription.remove();
+        wakeWordSubscription.remove();
       };
     } catch (e) {
       console.error('useEffect error:', e.message);
@@ -309,11 +317,26 @@ export default function App() {
     }
   }
 
+  function resetConversationSilenceWindow() {
+    conversationSilenceDeadlineRef.current = Date.now() + CONVERSATION_SILENCE_TIMEOUT_MS;
+  }
+
+  function hasConversationTimedOut() {
+    return Boolean(
+      conversationSilenceDeadlineRef.current &&
+        Date.now() >= conversationSilenceDeadlineRef.current
+    );
+  }
+
   function scheduleReplyTimeout() {
     clearReplyTimeout();
+    const remainingMs = conversationSilenceDeadlineRef.current
+      ? Math.max(0, conversationSilenceDeadlineRef.current - Date.now())
+      : CONVERSATION_SILENCE_TIMEOUT_MS;
+
     replyTimeoutRef.current = setTimeout(() => {
       playSleepSoundAndStartWakeMode();
-    }, 10000);
+    }, remainingMs);
   }
 
   function closeWebSocket() {
@@ -560,9 +583,35 @@ export default function App() {
     }
   }
 
+  async function stopWakeWordListening() {
+    try {
+      await callNativeModule('AurelWakeWordModule', 'stopWakeWordListening');
+    } catch (error) {
+      console.warn('Wake word listening stop failed:', error);
+    }
+  }
+
+  async function stopAllListeningAndSetIdle() {
+    clearReplyTimeout();
+    clearSpeakingTimer();
+    conversationSilenceDeadlineRef.current = null;
+    processingSpeechRef.current = false;
+    await stopVoiceListening();
+    await stopWakeWordListening();
+    listeningModeRef.current = LISTENING_MODE.WAKE;
+    setAssistantState(ASSISTANT_STATE.WAKE);
+    setStatusText('Idle');
+    setStateLabel('Aurel berhenti');
+    setResponse('Aurel berhenti.');
+    updateNotificationState('idle');
+  }
+
   async function startAudioRecording(mode) {
     try {
       await stopVoiceListening();
+      if (mode === LISTENING_MODE.CONVERSATION) {
+        await stopWakeWordListening();
+      }
       const hasPermission = await ensureSpeechRecognitionPermission();
 
       if (!hasPermission) {
@@ -625,15 +674,44 @@ export default function App() {
 
   async function startWakeWordListening() {
     clearReplyTimeout();
+    conversationSilenceDeadlineRef.current = null;
+    await stopVoiceListening();
     setAssistantState(ASSISTANT_STATE.WAKE);
     setStatusText("Mendengarkan 'Aurel'...");
     setStateLabel("Ucapkan 'Aurel' untuk memulai");
     updateNotificationState('idle');
-    await startAudioRecording(LISTENING_MODE.WAKE);
+    listeningModeRef.current = LISTENING_MODE.WAKE;
+    voiceActiveRef.current = true;
+    processingSpeechRef.current = false;
+
+    try {
+      if (!hasNativeMethod('AurelWakeWordModule', 'startWakeWordListening')) {
+        Alert.alert(
+          'Wake Word Required',
+          'Aurel native wake word detection is not available in this build.'
+        );
+        return;
+      }
+
+      await callNativeModule('AurelWakeWordModule', 'startWakeWordListening');
+    } catch (error) {
+      voiceActiveRef.current = false;
+      console.warn('Wake word listening failed:', error);
+      Alert.alert(
+        'Wake Word Required',
+        'Aurel wake word model is not available. Make sure soundclassifier_with_metadata.tflite is included in Android assets.'
+      );
+    }
   }
 
-  async function startConversationListening(nextStatus = 'Mendengarkan balasan...') {
+  async function startConversationListening(
+    nextStatus = 'Mendengarkan perintah...',
+    resetSilenceWindow = true
+  ) {
     clearReplyTimeout();
+    if (resetSilenceWindow) {
+      resetConversationSilenceWindow();
+    }
     setAssistantState(ASSISTANT_STATE.LISTENING);
     setStatusText(nextStatus);
     setStateLabel('Mendengarkan...');
@@ -642,16 +720,15 @@ export default function App() {
     scheduleReplyTimeout();
   }
 
-  function hasWakeWord(text) {
-    const normalizedText = text
+  function isStopCommand(text) {
+    const normalizedText = String(text || '')
       .toLowerCase()
       .replace(/[^a-z\s]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
-    return WAKE_WORDS.some((wakeWord) => {
-      const normalizedWakeWord = wakeWord.replace(/\s+/g, '\\s+');
-      return new RegExp(`(^|\\s)${normalizedWakeWord}(\\s|$)`).test(normalizedText);
+    return STOP_COMMANDS.some((command) => {
+      return new RegExp(`(^|\\s)${command}(\\s|$)`).test(normalizedText);
     });
   }
 
@@ -910,37 +987,34 @@ export default function App() {
     recordingActiveRef.current = false;
 
     if (!base64Audio || processingSpeechRef.current) {
-      if (listeningModeRef.current === LISTENING_MODE.WAKE && !processingSpeechRef.current) {
-        await startWakeWordListening();
-      }
       return;
     }
 
-    if (listeningModeRef.current === LISTENING_MODE.WAKE) {
-      await handleWakeRecordingComplete(base64Audio);
+    if (listeningModeRef.current !== LISTENING_MODE.CONVERSATION) {
       return;
     }
 
     await handleConversationRecordingComplete(base64Audio);
   }
 
-  async function handleWakeRecordingComplete(base64Audio) {
-    try {
-      const transcript = await transcribeWakeAudio(base64Audio);
+  async function handleWakeWordDetected(payload) {
+    const eventText = String(payload || '');
+    const [type, confidence] = eventText.split(':');
 
-      if (transcript) {
-        setTranscript(transcript);
-      }
+    console.log(`Wake word event: ${type} ${confidence || ''}`);
 
-      if (hasWakeWord(transcript)) {
-        await activateAurel();
-        return;
-      }
-    } catch (error) {
-      console.warn('Wake transcription failed:', error);
+    if (type === 'STOP') {
+      await stopAllListeningAndSetIdle();
+      return;
     }
 
-    await startWakeWordListening();
+    if (
+      type === 'AUREL' &&
+      listeningModeRef.current === LISTENING_MODE.WAKE &&
+      !processingSpeechRef.current
+    ) {
+      await activateAurel();
+    }
   }
 
   async function handleConversationRecordingComplete(base64Audio) {
@@ -953,11 +1027,22 @@ export default function App() {
 
       if (!commandText) {
         processingSpeechRef.current = false;
-        await startConversationListening();
+        if (hasConversationTimedOut()) {
+          await playSleepSoundAndStartWakeMode();
+        } else {
+          await startConversationListening('Mendengarkan perintah...', false);
+        }
         return;
       }
 
       setTranscript(commandText);
+
+      if (isStopCommand(commandText)) {
+        setResponse('Aurel berhenti.');
+        processingSpeechRef.current = false;
+        await startWakeWordListening();
+        return;
+      }
 
       if (await executeVolumeCommand(commandText)) {
         processingSpeechRef.current = false;
@@ -990,23 +1075,6 @@ export default function App() {
     }
   }
 
-  async function transcribeWakeAudio(audio) {
-    const result = await fetch(`${SERVER_URL}/transcribe-wake`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ audio, type: 'wake' }),
-    });
-    const data = await result.json();
-
-    if (!result.ok) {
-      throw new Error(data.error || `Server returned ${result.status}`);
-    }
-
-    return String(data.transcript || '').trim();
-  }
-
   async function transcribeConversationAudio(audio) {
     const result = await fetch(`${SERVER_URL}/transcribe`, {
       method: 'POST',
@@ -1031,16 +1099,17 @@ export default function App() {
 
     processingSpeechRef.current = true;
     await stopVoiceListening();
+    await stopWakeWordListening();
     connectWebSocket();
     updateNotificationState('active');
     setTranscript("Wake word detected: Aurel");
-    setResponse('Ya?');
+    setResponse('Yes bos');
     setAssistantState(ASSISTANT_STATE.SPEAKING);
-    setStatusText('Aurel Aktif - Silakan bicara');
+    setStatusText('Mendengarkan perintah...');
     setStateLabel('Aurel Aktif - Silakan bicara');
-    await speakText('Ya?', () => {
+    await speakText('Yes bos', () => {
       processingSpeechRef.current = false;
-      startConversationListening('Aurel Aktif - Silakan bicara');
+      startConversationListening('Mendengarkan perintah...');
     });
   }
 
@@ -1126,6 +1195,8 @@ export default function App() {
 
   async function playSleepSoundAndStartWakeMode() {
     clearReplyTimeout();
+    processingSpeechRef.current = true;
+    conversationSilenceDeadlineRef.current = null;
     await stopVoiceListening();
     setStatusText("Mendengarkan 'Aurel'...");
     setStateLabel("Ucapkan 'Aurel' untuk memulai");

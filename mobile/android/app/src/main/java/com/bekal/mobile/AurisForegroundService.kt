@@ -3,14 +3,12 @@ package com.bekal.mobile
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
-import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.view.Gravity
 import android.view.View
@@ -131,11 +129,15 @@ class AurisForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Aurel Voice Assistant",
-                NotificationManager.IMPORTANCE_DEFAULT
+                "Aurel Background",
+                NotificationManager.IMPORTANCE_MIN
             ).apply {
-                description = "Aurel is listening in background"
+                description = "Aurel background service"
+                setSound(null, null)
+                enableVibration(false)
+                enableLights(false)
                 setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
@@ -200,37 +202,14 @@ class AurisForegroundService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val openAppPendingIntent = createOpenAppPendingIntent()
-        val notificationText = when (notificationState) {
-            STATE_IDLE -> "Ucapkan 'Aurel' untuk memulai"
-            STATE_LISTENING -> "Mendengarkan kamu..."
-            STATE_SPEAKING -> "Aurel sedang berbicara..."
-            STATE_ACTIVE -> "Aurel aktif"
-            else -> "Aurel aktif"
-        }
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Aurel Aktif")
-            .setContentText(notificationText)
+            .setContentTitle("Aurel")
+            .setContentText("")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.auris_logo))
-            .setContentIntent(openAppPendingIntent)
-            .addAction(android.R.drawable.ic_menu_view, "Buka Aurel", openAppPendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)
+            .setSilent(true)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .build()
-    }
-
-    private fun createOpenAppPendingIntent(): PendingIntent {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_IMMUTABLE
-            } else {
-                0
-            }
-        return PendingIntent.getActivity(this, 0, intent, flags)
     }
 }
