@@ -27,7 +27,7 @@ class AurelWakeWordModule(private val reactContext: ReactApplicationContext) : R
         AudioFormat.CHANNEL_IN_MONO,
         AudioFormat.ENCODING_PCM_16BIT
     )
-    private val MODEL_INPUT_SIZE = 44032 // ~1 second at 44100Hz
+    private val MODEL_INPUT_SIZE = 44032 // Input sample count, not byte count (~1 second at 44100Hz)
 
     @ReactMethod
     fun initialize(promise: Promise) {
@@ -119,11 +119,12 @@ class AurelWakeWordModule(private val reactContext: ReactApplicationContext) : R
     )
 
     private fun runInference(audioBuffer: ShortArray): InferenceResult {
-        val inputBuffer = ByteBuffer.allocateDirect(MODEL_INPUT_SIZE * 2)
+        // Model expects float32, so convert Short (-32768..32767) to Float (-1.0..1.0).
+        val inputBuffer = ByteBuffer.allocateDirect(MODEL_INPUT_SIZE * 4)
             .order(ByteOrder.nativeOrder())
 
         for (sample in audioBuffer) {
-            inputBuffer.putShort(sample)
+            inputBuffer.putFloat(sample / 32768.0f)
         }
         inputBuffer.rewind()
 

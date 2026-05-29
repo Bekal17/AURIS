@@ -99,6 +99,7 @@ export default function App() {
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
   const [audioOutputDevice, setAudioOutputDevice] = useState('unknown');
+  const [isCallActive, setIsCallActive] = useState(false);
   const assistantStateRef = useRef(ASSISTANT_STATE.WAKE);
   const audioPlayerRef = useRef(null);
   const audioSubscriptionRef = useRef(null);
@@ -111,6 +112,7 @@ export default function App() {
   const pendingWhatsAppCallRef = useRef(null);
   const pendingWhatsAppReplyRef = useRef(null);
   const pendingAurelIntentRef = useRef(null);
+  const isCallActiveRef = useRef(false);
   const startupFlowCompleteRef = useRef(false);
   const startupFlowRunningRef = useRef(false);
   const replyTimeoutRef = useRef(null);
@@ -197,6 +199,12 @@ export default function App() {
           await handleAudioDeviceChanged(device);
         }
       );
+      const phoneStateSubscription = DeviceEventEmitter.addListener(
+        'onPhoneStateChanged',
+        async (phoneState) => {
+          await handlePhoneStateChanged(phoneState);
+        }
+      );
       const recordingCompleteSubscription = DeviceEventEmitter.addListener(
         'onRecordingComplete',
         handleRecordingComplete
@@ -211,6 +219,7 @@ export default function App() {
         incomingCallSubscription.remove();
         whatsAppCallSubscription.remove();
         audioDeviceSubscription.remove();
+        phoneStateSubscription.remove();
         recordingCompleteSubscription.remove();
         wakeWordSubscription.remove();
       };
@@ -270,6 +279,14 @@ export default function App() {
 
   function scheduleReplyTimeout() {
     clearReplyTimeout();
+
+    if (isCallActiveRef.current) {
+      replyTimeoutRef.current = setTimeout(() => {
+        startConversationListening("Telepon aktif - ucapkan 'Aurel' untuk perintah", false);
+      }, CONVERSATION_SILENCE_TIMEOUT_MS);
+      return;
+    }
+
     const remainingMs = conversationSilenceDeadlineRef.current
       ? Math.max(0, conversationSilenceDeadlineRef.current - Date.now())
       : CONVERSATION_SILENCE_TIMEOUT_MS;
@@ -338,6 +355,40 @@ export default function App() {
     await routeAudioForDevice(device);
   }
 
+  async function handlePhoneStateChanged(phoneState) {
+    const nextPhoneState = String(phoneState || '').toUpperCase();
+    console.log(`Phone state changed: ${nextPhoneState}`);
+
+    if (nextPhoneState === 'RINGING') {
+      return;
+    }
+
+    if (nextPhoneState === 'OFFHOOK') {
+      isCallActiveRef.current = true;
+      setIsCallActive(true);
+      await stopWakeWordListening();
+      setStatusText("Telepon aktif - ucapkan 'Aurel' untuk perintah");
+      setStateLabel('Telepon aktif');
+      updateNotificationState('listening');
+      await startConversationListening("Telepon aktif - ucapkan 'Aurel' untuk perintah", false);
+      return;
+    }
+
+    if (nextPhoneState === 'IDLE') {
+      const wasCallActive = isCallActiveRef.current;
+      isCallActiveRef.current = false;
+      setIsCallActive(false);
+
+      if (wasCallActive) {
+        setStatusText('Telepon selesai');
+        setStateLabel("Ucapkan 'Aurel' untuk memulai");
+        await speakText('Telepon selesai', () => startWakeWordListening());
+      } else if (startupFlowCompleteRef.current) {
+        await startWakeWordListening();
+      }
+    }
+  }
+
   async function runStartupPermissionFlow() {
     if (startupFlowCompleteRef.current || startupFlowRunningRef.current) {
       return;
@@ -368,6 +419,7 @@ export default function App() {
 
       try {
         callNativeModule('AurisModule', 'startForegroundService');
+        callNativeModule('AurisPhoneModule', 'registerCallStateListener');
       } catch (error) {
         console.warn('Failed to start Aurel background services:', error);
       }
@@ -579,6 +631,16 @@ export default function App() {
 
   async function startAudioRecording(mode) {
     try {
+      if (isCallActiveRef.current) {
+        const audioMode = await (
+          NativeModules.AurisPhoneModule?.getAudioMode?.() ?? Promise.resolve('unknown')
+        );
+
+        if (audioMode === 'in_call') {
+          console.log('Call active - limited listening mode');
+        }
+      }
+
       await stopVoiceListening();
       if (mode === LISTENING_MODE.CONVERSATION) {
         await stopWakeWordListening();
@@ -644,6 +706,14 @@ export default function App() {
   }
 
   async function startWakeWordListening() {
+    if (isCallActiveRef.current) {
+      await stopVoiceListening();
+      setStatusText("Telepon aktif - ucapkan 'Aurel' untuk perintah");
+      setStateLabel('Telepon aktif');
+      updateNotificationState('listening');
+      return;
+    }
+
     clearReplyTimeout();
     conversationSilenceDeadlineRef.current = null;
     pendingAurelIntentRef.current = null;
@@ -1008,6 +1078,23 @@ export default function App() {
       }
 
       setTranscript(commandText);
+
+      if (isCallActiveRef.current) {
+        const normalizedCommand = commandText.toLowerCase();
+
+        if (normalizedCommand.includes('aurel')) {
+          const phoneCommand = normalizedCommand.replace(/\baurel\b/g, '').trim();
+          const handled = await executePhoneCommand(phoneCommand || normalizedCommand);
+
+          if (handled) {
+            return;
+          }
+        }
+
+        processingSpeechRef.current = false;
+        await startConversationListening("Telepon aktif - ucapkan 'Aurel' untuk perintah", false);
+        return;
+      }
 
       if (isStopCommand(commandText)) {
         setResponse('Aurel berhenti.');
@@ -1471,7 +1558,9 @@ export default function App() {
 
           <View style={styles.bottomStatus}>
             <View style={[styles.statusDot, { backgroundColor: stateConfig.color }]} />
-            <Text style={styles.statusText}>{statusText}</Text>
+            <Text style={styles.statusText}>
+              {isCallActive ? `${statusText} · Mode telepon` : statusText}
+            </Text>
           </View>
         </View>
       </ScrollView>

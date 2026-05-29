@@ -5,11 +5,16 @@ import android.media.AudioManager
 import android.app.NotificationManager
 import android.os.Build
 import android.telecom.TelecomManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyManager
 import com.facebook.react.bridge.*
+import com.facebook.react.modules.core.DeviceEventManagerModule
 
 class AurisPhoneModule(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
     override fun getName() = "AurisPhoneModule"
+
+    private var callStateListener: PhoneStateListener? = null
 
     private val audioManager by lazy {
         reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -17,6 +22,51 @@ class AurisPhoneModule(private val reactContext: ReactApplicationContext) : Reac
 
     private val telecomManager by lazy {
         reactContext.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+    }
+
+    @ReactMethod
+    fun registerCallStateListener() {
+        try {
+            val telephonyManager = reactContext.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+
+            if (callStateListener == null) {
+                callStateListener = object : PhoneStateListener() {
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        val stateStr = when (state) {
+                            TelephonyManager.CALL_STATE_RINGING -> "RINGING"
+                            TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"
+                            TelephonyManager.CALL_STATE_IDLE -> "IDLE"
+                            else -> "UNKNOWN"
+                        }
+
+                        reactContext
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                            .emit("onPhoneStateChanged", stateStr)
+                    }
+                }
+            }
+
+            telephonyManager.listen(callStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+        } catch (e: Exception) {
+            reactContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit("onPhoneStateChanged", "UNKNOWN")
+        }
+    }
+
+    @ReactMethod
+    fun getAudioMode(promise: Promise) {
+        try {
+            val mode = when (audioManager.mode) {
+                AudioManager.MODE_IN_CALL -> "in_call"
+                AudioManager.MODE_IN_COMMUNICATION -> "in_communication"
+                AudioManager.MODE_RINGTONE -> "ringtone"
+                else -> "normal"
+            }
+            promise.resolve(mode)
+        } catch (e: Exception) {
+            promise.resolve("unknown")
+        }
     }
 
     @ReactMethod
