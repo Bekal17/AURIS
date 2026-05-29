@@ -34,7 +34,8 @@
         {
           "microphonePermission": "Allow Aurel to access your microphone for voice commands."
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "owner": "bekal"
   }

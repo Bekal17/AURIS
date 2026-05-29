@@ -16,6 +16,15 @@ import {
 import { createAudioPlayer } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
 import AurelFace from './src/AurelFace';
+import { useGoogleAuth, saveGoogleToken, getGoogleToken } from './src/GoogleAuth';
+import {
+  getUpcomingEvents,
+  createEvent,
+  deleteEvent,
+  searchEvents,
+  formatEventsForSpeech,
+} from './src/GoogleCalendar';
+import { getUnreadEmails, formatEmailsForSpeech } from './src/GoogleGmail';
 
 const SERVER_URL = 'https://auris-production-a715.up.railway.app';
 const WS_URL = 'wss://auris-production-a715.up.railway.app/ws';
@@ -93,6 +102,7 @@ const STATE_CONFIG = {
 export default function App() {
   console.log('Aurel App: component mounted');
 
+  const { request: googleAuthRequest, response: googleAuthResponse, promptAsync } = useGoogleAuth();
   const [assistantState, setAssistantState] = useState(ASSISTANT_STATE.WAKE);
   const [statusText, setStatusText] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].status);
   const [stateLabel, setStateLabel] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].label);
@@ -129,6 +139,21 @@ export default function App() {
       console.error('useEffect error:', e.message);
     }
   }, [assistantState]);
+
+  useEffect(() => {
+    try {
+      if (googleAuthResponse?.type === 'success') {
+        const { authentication } = googleAuthResponse;
+        if (authentication?.accessToken) {
+          saveGoogleToken(authentication.accessToken)
+            .then(() => speakText('Google Calendar dan Gmail berhasil terhubung!'))
+            .catch((error) => console.warn('Failed to save Google token:', error));
+        }
+      }
+    } catch (e) {
+      console.error('useEffect error:', e.message);
+    }
+  }, [googleAuthResponse]);
 
   useEffect(() => {
     try {
@@ -389,6 +414,35 @@ export default function App() {
     }
   }
 
+  async function promptGoogleConnectionIfNeeded() {
+    try {
+      const googleToken = await getGoogleToken();
+      if (googleToken) {
+        return;
+      }
+
+      Alert.alert(
+        'Hubungkan Google',
+        'Hubungkan Google Calendar dan Gmail agar Aurel bisa membaca jadwal dan email kamu.',
+        [
+          {
+            text: 'Hubungkan',
+            onPress: () => {
+              if (!googleAuthRequest) {
+                Alert.alert('Google belum siap', 'Coba buka lagi beberapa detik lagi.');
+                return;
+              }
+              promptAsync();
+            },
+          },
+          { text: 'Nanti', style: 'cancel' },
+        ]
+      );
+    } catch (error) {
+      console.warn('Failed to check Google token:', error);
+    }
+  }
+
   async function runStartupPermissionFlow() {
     if (startupFlowCompleteRef.current || startupFlowRunningRef.current) {
       return;
@@ -416,6 +470,7 @@ export default function App() {
       }
 
       await requestContactsPermission();
+      await promptGoogleConnectionIfNeeded();
 
       try {
         callNativeModule('AurisModule', 'startForegroundService');
@@ -1221,6 +1276,93 @@ export default function App() {
           await callNativeModule('AurisPhoneModule', 'setMute', Boolean(intent.enabled));
         }
         return true;
+      case 'calendar_today': {
+        const token = await getGoogleToken();
+        if (!token) {
+          await speakText('Silakan hubungkan Google Calendar terlebih dahulu.');
+          return true;
+        }
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const events = await getUpcomingEvents(token, 10);
+        const todayEvents = events.filter((event) => {
+          const start = new Date(event.start?.dateTime || event.start?.date);
+          return start >= today && start < tomorrow;
+        });
+        const speech = todayEvents.length === 0
+          ? 'Tidak ada jadwal hari ini.'
+          : `Hari ini ada ${todayEvents.length} jadwal: ${formatEventsForSpeech(todayEvents)}`;
+        await speakText(speech);
+        return true;
+      }
+      case 'calendar_tomorrow': {
+        const token = await getGoogleToken();
+        if (!token) {
+          await speakText('Silakan hubungkan Google Calendar terlebih dahulu.');
+          return true;
+        }
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(0, 0, 0, 0);
+        const dayAfter = new Date(tomorrow);
+        dayAfter.setDate(dayAfter.getDate() + 1);
+        const events = await getUpcomingEvents(token, 10);
+        const tomorrowEvents = events.filter((event) => {
+          const start = new Date(event.start?.dateTime || event.start?.date);
+          return start >= tomorrow && start < dayAfter;
+        });
+        const speech = tomorrowEvents.length === 0
+          ? 'Tidak ada jadwal besok.'
+          : `Besok ada ${tomorrowEvents.length} jadwal: ${formatEventsForSpeech(tomorrowEvents)}`;
+        await speakText(speech);
+        return true;
+      }
+      case 'calendar_add': {
+        const token = await getGoogleToken();
+        if (!token) {
+          await speakText('Silakan hubungkan Google Calendar terlebih dahulu.');
+          return true;
+        }
+        const event = {
+          summary: intent.title,
+          start: { dateTime: intent.datetime, timeZone: 'Asia/Jakarta' },
+          end: {
+            dateTime: new Date(new Date(intent.datetime).getTime() + 3600000).toISOString(),
+            timeZone: 'Asia/Jakarta',
+          },
+        };
+        await createEvent(token, event);
+        await speakText(`Jadwal ${intent.title} berhasil ditambahkan.`);
+        return true;
+      }
+      case 'calendar_delete': {
+        const token = await getGoogleToken();
+        if (!token) {
+          await speakText('Silakan hubungkan Google Calendar terlebih dahulu.');
+          return true;
+        }
+        const events = await searchEvents(token, intent.query);
+        if (events.length === 0) {
+          await speakText(`Jadwal ${intent.query} tidak ditemukan.`);
+        } else {
+          await deleteEvent(token, events[0].id);
+          await speakText(`Jadwal ${events[0].summary} berhasil dihapus.`);
+        }
+        return true;
+      }
+      case 'gmail_read': {
+        const token = await getGoogleToken();
+        if (!token) {
+          await speakText('Silakan hubungkan Gmail terlebih dahulu.');
+          return true;
+        }
+        const emails = await getUnreadEmails(token, 3);
+        const speech = formatEmailsForSpeech(emails);
+        await speakText(speech);
+        return true;
+      }
       case 'speak':
       default:
         return true;

@@ -54,6 +54,21 @@ Mute:
 Unmute:
 {"action":"mute","enabled":false,"speak":"Mikrofon diaktifkan"}
 
+Baca jadwal hari ini:
+{"action":"calendar_today","speak":"Mengambil jadwal hari ini"}
+
+Jadwal besok:
+{"action":"calendar_tomorrow","speak":"Mengambil jadwal besok"}
+
+Tambah jadwal:
+{"action":"calendar_add","title":"judul event","datetime":"ISO datetime string","speak":"Menambahkan jadwal"}
+
+Hapus jadwal:
+{"action":"calendar_delete","query":"keyword pencarian","speak":"Mencari dan menghapus jadwal"}
+
+Baca email:
+{"action":"gmail_read","speak":"Membacakan email terbaru"}
+
 Pertanyaan umum:
 {"action":"speak","speak":"jawaban natural maksimal 2 kalimat"}
 
