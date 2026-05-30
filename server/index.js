@@ -1,16 +1,21 @@
 import express from 'express';
 import { createServer } from 'http';
 import Anthropic from '@anthropic-ai/sdk';
-import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
+import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
+import { createReadStream } from 'fs';
+import fs from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const TTS_VOICE_ID = 'pFZP5JQG7iQjIQuC4Bku';
+const OPENAI_TTS_VOICE = 'nova';
 const AUREL_SYSTEM_PROMPT = `Kamu adalah Aurel, asisten suara hands-free untuk pengemudi, orang sibuk, dan penyandang disabilitas.
 Deteksi bahasa user dan balas dalam bahasa yang sama.
 
@@ -86,12 +91,12 @@ const upload = multer({
   },
 });
 
-const elevenlabs = new ElevenLabsClient({
-  apiKey: process.env.ELEVENLABS_API_KEY,
-});
-
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 app.use(express.json({ limit: '10mb' }));
@@ -150,12 +155,13 @@ async function streamToBuffer(stream) {
 }
 
 async function getTextToSpeechAudio(responseText) {
-  const audioStream = await elevenlabs.textToSpeech.convert(TTS_VOICE_ID, {
-    text: responseText,
-    modelId: 'eleven_multilingual_v2',
-    outputFormat: 'mp3_44100_128',
+  const audioResponse = await openai.audio.speech.create({
+    model: 'tts-1',
+    voice: OPENAI_TTS_VOICE,
+    input: responseText,
+    response_format: 'mp3',
   });
-  const audioBuffer = await streamToBuffer(audioStream);
+  const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
 
   return audioBuffer.toString('base64');
 }
@@ -202,18 +208,42 @@ function base64PcmToWav(base64Audio) {
   return pcmToWav(pcmBuffer, 16000, 1, 16);
 }
 
-async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wav', contentType = 'audio/wav') {
-  const transcription = await elevenlabs.speechToText.convert({
-    file: {
-      data: audioBuffer,
-      filename,
-      contentType,
-      contentLength: audioBuffer.length,
-    },
-    modelId: 'scribe_v2',
+async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wav') {
+  const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const tempPath = join(tmpdir(), `${randomUUID()}-${safeFilename}`);
+
+  try {
+    await fs.writeFile(tempPath, audioBuffer);
+    const transcription = await openai.audio.transcriptions.create({
+      file: createReadStream(tempPath),
+      model: 'whisper-1',
+    });
+
+    return String(transcription.text || '').trim();
+  } finally {
+    await fs.unlink(tempPath).catch(() => {});
+  }
+}
+
+async function transcribeBase64PcmAudio(base64Audio, filename = 'aurel-recording.wav') {
+  const wavAudio = base64PcmToWav(base64Audio);
+  return transcribeAudioBuffer(wavAudio, filename);
+}
+
+async function transcribePcmBuffer(audioBuffer, filename = 'aurel-ws.wav') {
+  const wavAudio = pcmToWav(audioBuffer, 16000, 1, 16);
+  return transcribeAudioBuffer(wavAudio, filename);
+}
+
+async function getTextToSpeechBuffer(responseText) {
+  const audioResponse = await openai.audio.speech.create({
+    model: 'tts-1',
+    voice: OPENAI_TTS_VOICE,
+    input: responseText,
+    response_format: 'mp3',
   });
 
-  return getTranscriptionText(transcription);
+  return Buffer.from(await audioResponse.arrayBuffer());
 }
 
 async function buildTranscribeResponse(transcript) {
@@ -240,8 +270,7 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
     }
 
     if (req.body?.audio) {
-      const wavAudio = base64PcmToWav(req.body.audio);
-      const transcript = await transcribeAudioBuffer(wavAudio);
+      const transcript = await transcribeBase64PcmAudio(req.body.audio);
 
       if (!transcript) {
         res.status(422).json({ error: 'No transcript returned from audio.' });
@@ -260,8 +289,7 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
 
     const transcript = await transcribeAudioBuffer(
       req.file.buffer,
-      req.file.originalname || 'aurel-recording.m4a',
-      req.file.mimetype || 'audio/m4a'
+      req.file.originalname || 'aurel-recording.m4a'
     );
 
     if (!transcript) {
@@ -284,8 +312,7 @@ app.post('/transcribe-wake', async (req, res) => {
       return;
     }
 
-    const wavAudio = base64PcmToWav(req.body.audio);
-    const transcript = await transcribeAudioBuffer(wavAudio, 'aurel-wake.wav', 'audio/wav');
+    const transcript = await transcribeBase64PcmAudio(req.body.audio, 'aurel-wake.wav');
 
     res.json({ transcript });
   } catch (error) {
@@ -343,20 +370,12 @@ async function getClaudeSpeechEngineResponse(transcript) {
 }
 
 async function streamTextToSpeechToMobile(mobileWs, responseText) {
-  const audioStream = await elevenlabs.textToSpeech.stream(TTS_VOICE_ID, {
-    text: responseText,
-    modelId: 'eleven_multilingual_v2',
-    outputFormat: 'mp3_44100_128',
-  });
+  const audioBuffer = await getTextToSpeechBuffer(responseText);
 
   sendJson(mobileWs, { type: 'audio.start', audioFormat: 'mp3' });
 
-  for await (const chunk of audioStream) {
-    if (mobileWs.readyState !== WebSocket.OPEN) {
-      break;
-    }
-
-    mobileWs.send(Buffer.from(chunk), { binary: true });
+  if (mobileWs.readyState === WebSocket.OPEN) {
+    mobileWs.send(audioBuffer, { binary: true });
   }
 
   sendJson(mobileWs, { type: 'audio.complete', audioFormat: 'mp3' });
@@ -379,130 +398,33 @@ async function handleSpeechEngineTranscript(mobileWs, transcript) {
   }
 }
 
-async function createSpeechEngineSocket(mobileWs) {
-  const speechEngineId = process.env.SPEECH_ENGINE_ID;
-
-  if (!speechEngineId) {
-    throw new Error('SPEECH_ENGINE_ID is required.');
-  }
-
-  await elevenlabs.speechEngine.get(speechEngineId);
-
-  const speechEngineWs = new WebSocket(
-    `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(speechEngineId)}`,
-    {
-      headers: {
-        'xi-api-key': process.env.ELEVENLABS_API_KEY,
-      },
-    }
-  );
-
-  speechEngineWs.on('open', () => {
-    sendJson(mobileWs, { type: 'speech_engine.connected' });
-    speechEngineWs.send(JSON.stringify({
-      type: 'conversation_initiation_client_data',
-      conversation_config_override: {
-        agent: {
-          prompt: {
-            prompt: SPEECH_ENGINE_SYSTEM_PROMPT,
-            llm: 'claude-haiku-4-5-20251001',
-          },
-        },
-        tts: {
-          voice_id: TTS_VOICE_ID,
-        },
-      },
-    }));
-  });
-
-  speechEngineWs.on('message', async (rawMessage) => {
-    try {
-      const event = JSON.parse(rawMessage.toString());
-
-      if (event.type === 'ping') {
-        speechEngineWs.send(JSON.stringify({
-          type: 'pong',
-          event_id: event.ping_event?.event_id,
-        }));
-        return;
-      }
-
-      if (event.type === 'user_transcript') {
-        await handleSpeechEngineTranscript(
-          mobileWs,
-          event.user_transcription_event?.user_transcript?.trim()
-        );
-        return;
-      }
-
-      if (event.type === 'audio' && event.audio_event?.audio_base_64) {
-        mobileWs.send(Buffer.from(event.audio_event.audio_base_64, 'base64'), { binary: true });
-        return;
-      }
-
-      if (event.type === 'agent_response') {
-        sendJson(mobileWs, {
-          type: 'speech_engine.agent_response',
-          response: event.agent_response_event?.agent_response,
-        });
-      }
-    } catch (error) {
-      console.error('Speech Engine message error:', error);
-      sendJson(mobileWs, { type: 'error', message: 'Failed to process Speech Engine event.' });
-    }
-  });
-
-  speechEngineWs.on('close', () => {
-    sendJson(mobileWs, { type: 'speech_engine.disconnected' });
-  });
-
-  speechEngineWs.on('error', (error) => {
-    console.error('Speech Engine WebSocket error:', error);
-    sendJson(mobileWs, { type: 'error', message: 'Speech Engine WebSocket error.' });
-  });
-
-  return speechEngineWs;
-}
-
 wss.on('connection', async (ws) => {
   sendJson(ws, { type: 'connection.ready' });
+  sendJson(ws, { type: 'speech_engine.connected' });
 
-  let speechEngineWs;
-
-  try {
-    speechEngineWs = await createSpeechEngineSocket(ws);
-  } catch (error) {
-    console.error('Speech Engine connection error:', error);
-    sendJson(ws, { type: 'error', message: error.message });
-  }
-
-  ws.on('message', (message, isBinary) => {
-    if (!speechEngineWs || speechEngineWs.readyState !== WebSocket.OPEN) {
-      sendJson(ws, { type: 'error', message: 'Speech Engine is not connected.' });
-      return;
-    }
-
-    if (isBinary) {
-      speechEngineWs.send(JSON.stringify({
-        user_audio_chunk: Buffer.from(message).toString('base64'),
-      }));
-      return;
-    }
-
+  ws.on('message', async (message, isBinary) => {
     try {
-      const payload = JSON.parse(message.toString());
+      let transcript = '';
 
-      if (payload.type === 'audio' && payload.audio) {
-        speechEngineWs.send(JSON.stringify({ user_audio_chunk: payload.audio }));
+      if (isBinary) {
+        transcript = await transcribePcmBuffer(Buffer.from(message));
+      } else {
+        const payload = JSON.parse(message.toString());
+
+        if (payload.type === 'audio' && payload.audio) {
+          transcript = await transcribeBase64PcmAudio(payload.audio, 'aurel-ws.wav');
+        } else if (payload.type === 'text' && payload.text) {
+          transcript = String(payload.text).trim();
+        } else {
+          sendJson(ws, { type: 'error', message: 'Expected audio or text payload.' });
+          return;
+        }
       }
-    } catch {
-      sendJson(ws, { type: 'error', message: 'Expected binary audio data.' });
-    }
-  });
 
-  ws.on('close', () => {
-    if (speechEngineWs?.readyState === WebSocket.OPEN) {
-      speechEngineWs.close();
+      await handleSpeechEngineTranscript(ws, transcript);
+    } catch (error) {
+      console.error('OpenAI WebSocket transcription error:', error);
+      sendJson(ws, { type: 'error', message: 'Failed to process audio.' });
     }
   });
 });
