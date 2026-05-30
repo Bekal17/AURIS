@@ -10,7 +10,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const TTS_VOICE_ID = 'cyD08lEy76q03ER1jZ7y';
+const TTS_VOICE_ID = 'pFZP5JQG7iQjIQuC4Bku';
 const AUREL_SYSTEM_PROMPT = `Kamu adalah Aurel, asisten suara hands-free untuk pengemudi, orang sibuk, dan penyandang disabilitas.
 Deteksi bahasa user dan balas dalam bahasa yang sama.
 
