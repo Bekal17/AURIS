@@ -130,7 +130,7 @@ function getClaudeText(message) {
 
 async function getClaudeResponse(transcript) {
   const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 256,
     system: TRANSCRIBE_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: transcript }],
@@ -325,7 +325,7 @@ function sendJson(ws, payload) {
 
 async function getClaudeSpeechEngineResponse(transcript) {
   const stream = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 256,
     system: SPEECH_ENGINE_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: transcript }],
@@ -405,7 +405,7 @@ async function createSpeechEngineSocket(mobileWs) {
         agent: {
           prompt: {
             prompt: SPEECH_ENGINE_SYSTEM_PROMPT,
-            llm: 'claude-sonnet-4-20250514',
+            llm: 'claude-haiku-4-5-20251001',
           },
         },
         tts: {
