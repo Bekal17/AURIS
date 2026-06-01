@@ -1488,7 +1488,70 @@ function HomeScreen({
     }
 
     const contacts = await callNativeModule('AurelContactsModule', 'findContact', contactName);
-    return contacts?.length > 0 ? contacts[0] : null;
+    if (!contacts?.length) {
+      return null;
+    }
+
+    const query = normalizeContactName(contactName);
+    const rankedContacts = contacts
+      .map((contact) => {
+        const normalizedName = normalizeContactName(contact.name);
+        const distance = getContactNameDistance(query, normalizedName);
+        let score = distance;
+
+        if (normalizedName.includes(query) || query.includes(normalizedName)) {
+          score = Math.min(score, 0);
+        }
+
+        return { contact, normalizedName, score };
+      })
+      .filter(({ normalizedName, score }) => {
+        if (!normalizedName) {
+          return false;
+        }
+        return normalizedName.includes(query) || query.includes(normalizedName) || score <= 2;
+      })
+      .sort((a, b) => a.score - b.score || b.normalizedName.length - a.normalizedName.length);
+
+    return rankedContacts[0]?.contact || contacts[0];
+  }
+
+  function normalizeContactName(name) {
+    return String(name || '')
+      .toLowerCase()
+      .replace(/ph/g, 'f')
+      .replace(/ck/g, 'k')
+      .replace(/y/g, 'i')
+      .replace(/[^a-z0-9]/g, '')
+      .replace(/(.)\1+/g, '$1');
+  }
+
+  function getContactNameDistance(a, b) {
+    if (!a || !b) {
+      return Math.max(a.length, b.length);
+    }
+
+    const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    const current = new Array(b.length + 1);
+
+    for (let i = 1; i <= a.length; i += 1) {
+      current[0] = i;
+
+      for (let j = 1; j <= b.length; j += 1) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        current[j] = Math.min(
+          previous[j] + 1,
+          current[j - 1] + 1,
+          previous[j - 1] + cost
+        );
+      }
+
+      for (let j = 0; j <= b.length; j += 1) {
+        previous[j] = current[j];
+      }
+    }
+
+    return previous[b.length];
   }
 
   function cleanPhoneNumber(phone) {
