@@ -15,7 +15,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const OPENAI_TTS_VOICE = 'nova';
+const OPENAI_TTS_VOICE = 'shimmer';
 const AUREL_SYSTEM_PROMPT = `Kamu adalah Aurel, asisten suara hands-free untuk pengemudi, orang sibuk, dan penyandang disabilitas.
 Deteksi bahasa user dan balas dalam bahasa yang sama.
 
@@ -185,6 +185,7 @@ async function getTextToSpeechAudio(responseText, language = 'id') {
     voice: getTtsVoice(language),
     input: responseText,
     response_format: 'mp3',
+    speed: 1.0,
   });
   const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
 
@@ -268,6 +269,7 @@ async function getTextToSpeechBuffer(responseText, language = 'id') {
     voice: getTtsVoice(language),
     input: responseText,
     response_format: 'mp3',
+    speed: 1.0,
   });
 
   return Buffer.from(await audioResponse.arrayBuffer());
@@ -284,6 +286,18 @@ async function buildTranscribeResponse(transcript, context = {}) {
     speak,
     audio,
     audioFormat: 'mp3',
+  };
+}
+
+function isEmptyWhisperTranscript(transcript) {
+  return !transcript || transcript.trim().length < 3;
+}
+
+function buildEmptyTranscribeResponse() {
+  return {
+    transcript: '',
+    response: '',
+    audio: '',
   };
 }
 
@@ -305,8 +319,8 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
         context.language
       );
 
-      if (!transcript) {
-        res.status(422).json({ error: 'No transcript returned from audio.' });
+      if (isEmptyWhisperTranscript(transcript)) {
+        res.json(buildEmptyTranscribeResponse());
         return;
       }
 
@@ -326,8 +340,8 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
       context.language
     );
 
-    if (!transcript) {
-      res.status(422).json({ error: 'No transcript returned from audio.' });
+    if (isEmptyWhisperTranscript(transcript)) {
+      res.json(buildEmptyTranscribeResponse());
       return;
     }
 
