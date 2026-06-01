@@ -1229,26 +1229,13 @@ function HomeScreen({
     }
   }
 
-  async function getAurelRequestProfile() {
-    const [username, language] = await Promise.all([
-      AsyncStorage.getItem('aurel_username'),
-      AsyncStorage.getItem('aurel_language'),
-    ]);
-
-    return {
-      username: username?.trim() || undefined,
-      language: language === 'en' ? 'en' : DEFAULT_LANGUAGE,
-    };
-  }
-
   async function transcribeConversationAudio(audio) {
-    const profile = await getAurelRequestProfile();
     const result = await fetch(`${SERVER_URL}/transcribe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ audio, ...profile }),
+      body: JSON.stringify({ audio }),
     });
     const data = await result.json();
 
@@ -1260,13 +1247,12 @@ function HomeScreen({
   }
 
   async function handleClaudeResponse(transcript, afterIntent) {
-    const profile = await getAurelRequestProfile();
     const result = await fetch(`${SERVER_URL}/transcribe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ text: transcript, ...profile }),
+      body: JSON.stringify({ text: transcript }),
     });
     const data = await result.json();
 
@@ -1277,16 +1263,26 @@ function HomeScreen({
     return handleClaudeIntentData(transcript, data, afterIntent);
   }
 
+  function parseClaudeIntentResponse(text) {
+    const cleaned = String(text || '')
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .trim();
+    return JSON.parse(cleaned);
+  }
+
   async function handleClaudeIntentData(transcriptText, data, afterIntent) {
     let intent;
+    let parsedResponseSpeak;
 
     try {
-      intent = JSON.parse(data.response);
+      intent = parseClaudeIntentResponse(data.response);
+      parsedResponseSpeak = intent.speak;
     } catch {
       intent = { action: 'speak', speak: data.speak || data.response };
     }
 
-    const speak = intent.speak || data.speak || data.response || 'Baik.';
+    const speak = parsedResponseSpeak || intent.speak || data.speak || data.response || 'Baik.';
     setTranscript(transcriptText);
     setResponse(speak);
 
@@ -1297,7 +1293,7 @@ function HomeScreen({
       }
     };
 
-    if (data.audio) {
+    if (data.audio && String(data.speak || '').trim() === speak) {
       await playResponseAudioOrSchedule(data.audio, speak, runAction);
       return;
     }
@@ -1604,13 +1600,12 @@ function HomeScreen({
   }
 
   async function getSpeakAudio(text) {
-    const profile = await getAurelRequestProfile();
     const result = await fetch(`${SERVER_URL}/speak`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ text, ...profile }),
+      body: JSON.stringify({ text }),
     });
     const rawResponse = await result.text();
     let data = {};
