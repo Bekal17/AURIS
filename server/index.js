@@ -81,6 +81,7 @@ PENTING:
 - Selalu return JSON valid, tidak ada teks di luar JSON
 - Field speak selalu dalam bahasa yang sama dengan user
 - Untuk send_wa tanpa pesan, tanya dulu dengan speak
+- When extracting contact names, normalize the name: remove extra characters, fix common STT errors (y→i, ph→f, ck→k, double letters→single). Return the most likely real Indonesian name. Example: 'bahtiyar' → 'bahtiar', 'phani' → 'fani', 'riicko' → 'rico'
 - Nama kontak gunakan persis seperti yang disebutkan user`;
 const TRANSCRIBE_SYSTEM_PROMPT = AUREL_SYSTEM_PROMPT;
 const SPEECH_ENGINE_SYSTEM_PROMPT = AUREL_SYSTEM_PROMPT;
