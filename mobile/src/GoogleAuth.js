@@ -27,6 +27,32 @@ export async function saveGoogleToken(token) {
   await AsyncStorage.setItem('google_token_expiry', expiry.toString());
 }
 
+export async function fetchGoogleUser(token) {
+  const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google profile returned ${response.status}`);
+  }
+
+  const user = await response.json();
+  return {
+    name: user.name || '',
+    email: user.email || '',
+    photo: user.picture || '',
+  };
+}
+
+export async function saveGoogleUser(user) {
+  await AsyncStorage.setItem('google_user', JSON.stringify(user));
+}
+
+export async function getGoogleUser() {
+  const rawUser = await AsyncStorage.getItem('google_user');
+  return rawUser ? JSON.parse(rawUser) : null;
+}
+
 export async function getGoogleToken() {
   const token = await AsyncStorage.getItem('google_access_token');
   const expiry = await AsyncStorage.getItem('google_token_expiry');
@@ -38,4 +64,5 @@ export async function getGoogleToken() {
 export async function clearGoogleToken() {
   await AsyncStorage.removeItem('google_access_token');
   await AsyncStorage.removeItem('google_token_expiry');
+  await AsyncStorage.removeItem('google_user');
 }

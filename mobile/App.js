@@ -15,8 +15,19 @@ import {
 } from 'react-native';
 import { createAudioPlayer } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { NavigationContainer } from '@react-navigation/native';
 import AurelFace from './src/AurelFace';
-import { useGoogleAuth, saveGoogleToken, getGoogleToken } from './src/GoogleAuth';
+import AppNavigator from './src/navigation/AppNavigator';
+import {
+  useGoogleAuth,
+  saveGoogleToken,
+  getGoogleToken,
+  clearGoogleToken,
+  fetchGoogleUser,
+  getGoogleUser,
+  saveGoogleUser,
+} from './src/GoogleAuth';
 import {
   getUpcomingEvents,
   createEvent,
@@ -71,6 +82,7 @@ const AUREL_GREEN = '#00FF41';
 const STOP_COMMANDS = ['stop', 'berhenti', 'selesai'];
 const CONVERSATION_SILENCE_TIMEOUT_MS = 10000;
 const WHATSAPP_UNAVAILABLE_MESSAGE = 'WhatsApp tidak terinstall di HP ini.';
+const DEFAULT_LANGUAGE = 'id';
 
 const STATE_CONFIG = {
   [ASSISTANT_STATE.WAKE]: {
@@ -100,9 +112,48 @@ const STATE_CONFIG = {
 };
 
 export default function App() {
+  const { request: googleAuthRequest, response: googleAuthResponse, promptAsync } = useGoogleAuth();
+  const [googleUser, setGoogleUser] = useState(null);
+
+  useEffect(() => {
+    getGoogleUser()
+      .then(setGoogleUser)
+      .catch((error) => console.warn('Failed to load Google user:', error));
+  }, []);
+
+  async function handleLogout() {
+    await clearGoogleToken();
+    setGoogleUser(null);
+  }
+
+  const HomeComponent = () => (
+    <HomeScreen
+      googleAuthRequest={googleAuthRequest}
+      googleAuthResponse={googleAuthResponse}
+      promptAsync={promptAsync}
+      onGoogleUserChange={setGoogleUser}
+    />
+  );
+
+  return (
+    <NavigationContainer>
+      <AppNavigator
+        HomeComponent={HomeComponent}
+        googleUser={googleUser}
+        onLogout={handleLogout}
+      />
+    </NavigationContainer>
+  );
+}
+
+function HomeScreen({
+  googleAuthRequest,
+  googleAuthResponse,
+  promptAsync,
+  onGoogleUserChange,
+}) {
   console.log('Aurel App: component mounted');
 
-  const { request: googleAuthRequest, response: googleAuthResponse, promptAsync } = useGoogleAuth();
   const [assistantState, setAssistantState] = useState(ASSISTANT_STATE.WAKE);
   const [statusText, setStatusText] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].status);
   const [stateLabel, setStateLabel] = useState(STATE_CONFIG[ASSISTANT_STATE.WAKE].label);
@@ -146,7 +197,12 @@ export default function App() {
         const { authentication } = googleAuthResponse;
         if (authentication?.accessToken) {
           saveGoogleToken(authentication.accessToken)
-            .then(() => speakText('Google Calendar dan Gmail berhasil terhubung!'))
+            .then(async () => {
+              const nextGoogleUser = await fetchGoogleUser(authentication.accessToken);
+              await saveGoogleUser(nextGoogleUser);
+              onGoogleUserChange?.(nextGoogleUser);
+              await speakText('Google Calendar dan Gmail berhasil terhubung!');
+            })
             .catch((error) => console.warn('Failed to save Google token:', error));
         }
       }
@@ -1173,13 +1229,26 @@ export default function App() {
     }
   }
 
+  async function getAurelRequestProfile() {
+    const [username, language] = await Promise.all([
+      AsyncStorage.getItem('aurel_username'),
+      AsyncStorage.getItem('aurel_language'),
+    ]);
+
+    return {
+      username: username?.trim() || undefined,
+      language: language === 'en' ? 'en' : DEFAULT_LANGUAGE,
+    };
+  }
+
   async function transcribeConversationAudio(audio) {
+    const profile = await getAurelRequestProfile();
     const result = await fetch(`${SERVER_URL}/transcribe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ audio }),
+      body: JSON.stringify({ audio, ...profile }),
     });
     const data = await result.json();
 
@@ -1191,12 +1260,13 @@ export default function App() {
   }
 
   async function handleClaudeResponse(transcript, afterIntent) {
+    const profile = await getAurelRequestProfile();
     const result = await fetch(`${SERVER_URL}/transcribe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ text: transcript }),
+      body: JSON.stringify({ text: transcript, ...profile }),
     });
     const data = await result.json();
 
@@ -1534,12 +1604,13 @@ export default function App() {
   }
 
   async function getSpeakAudio(text) {
+    const profile = await getAurelRequestProfile();
     const result = await fetch(`${SERVER_URL}/speak`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, ...profile }),
     });
     const rawResponse = await result.text();
     let data = {};

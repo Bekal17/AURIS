@@ -133,11 +133,36 @@ function getClaudeText(message) {
     .trim();
 }
 
-async function getClaudeResponse(transcript) {
+function normalizeLanguage(language) {
+  return language === 'en' ? 'en' : 'id';
+}
+
+function getRequestContext(body = {}) {
+  const username = String(body.username || '').trim();
+
+  return {
+    username,
+    language: normalizeLanguage(body.language),
+  };
+}
+
+function buildSystemPrompt(basePrompt, username) {
+  if (!username) {
+    return basePrompt;
+  }
+
+  return `${basePrompt}\nPanggil user dengan nama ${username}.`;
+}
+
+function getTtsVoice(language) {
+  return language === 'en' ? OPENAI_TTS_VOICE : OPENAI_TTS_VOICE;
+}
+
+async function getClaudeResponse(transcript, context = {}) {
   const message = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 256,
-    system: TRANSCRIBE_SYSTEM_PROMPT,
+    system: buildSystemPrompt(TRANSCRIBE_SYSTEM_PROMPT, context.username),
     messages: [{ role: 'user', content: transcript }],
   });
 
@@ -154,10 +179,10 @@ async function streamToBuffer(stream) {
   return Buffer.concat(chunks);
 }
 
-async function getTextToSpeechAudio(responseText) {
+async function getTextToSpeechAudio(responseText, language = 'id') {
   const audioResponse = await openai.audio.speech.create({
     model: 'tts-1',
-    voice: OPENAI_TTS_VOICE,
+    voice: getTtsVoice(language),
     input: responseText,
     response_format: 'mp3',
   });
@@ -208,7 +233,7 @@ function base64PcmToWav(base64Audio) {
   return pcmToWav(pcmBuffer, 16000, 1, 16);
 }
 
-async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wav') {
+async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wav', language = 'id') {
   const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
   const tempPath = join(tmpdir(), `${randomUUID()}-${safeFilename}`);
 
@@ -217,6 +242,7 @@ async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wa
     const transcription = await openai.audio.transcriptions.create({
       file: createReadStream(tempPath),
       model: 'whisper-1',
+      language: normalizeLanguage(language),
     });
 
     return String(transcription.text || '').trim();
@@ -225,20 +251,20 @@ async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wa
   }
 }
 
-async function transcribeBase64PcmAudio(base64Audio, filename = 'aurel-recording.wav') {
+async function transcribeBase64PcmAudio(base64Audio, filename = 'aurel-recording.wav', language = 'id') {
   const wavAudio = base64PcmToWav(base64Audio);
-  return transcribeAudioBuffer(wavAudio, filename);
+  return transcribeAudioBuffer(wavAudio, filename, language);
 }
 
-async function transcribePcmBuffer(audioBuffer, filename = 'aurel-ws.wav') {
+async function transcribePcmBuffer(audioBuffer, filename = 'aurel-ws.wav', language = 'id') {
   const wavAudio = pcmToWav(audioBuffer, 16000, 1, 16);
-  return transcribeAudioBuffer(wavAudio, filename);
+  return transcribeAudioBuffer(wavAudio, filename, language);
 }
 
-async function getTextToSpeechBuffer(responseText) {
+async function getTextToSpeechBuffer(responseText, language = 'id') {
   const audioResponse = await openai.audio.speech.create({
     model: 'tts-1',
-    voice: OPENAI_TTS_VOICE,
+    voice: getTtsVoice(language),
     input: responseText,
     response_format: 'mp3',
   });
@@ -246,10 +272,10 @@ async function getTextToSpeechBuffer(responseText) {
   return Buffer.from(await audioResponse.arrayBuffer());
 }
 
-async function buildTranscribeResponse(transcript) {
-  const response = await getClaudeResponse(transcript);
+async function buildTranscribeResponse(transcript, context = {}) {
+  const response = await getClaudeResponse(transcript, context);
   const speak = getSpeakTextFromClaudeResponse(response);
-  const audio = await getTextToSpeechAudio(speak);
+  const audio = await getTextToSpeechAudio(speak, context.language);
 
   return {
     transcript,
@@ -262,22 +288,28 @@ async function buildTranscribeResponse(transcript) {
 
 app.post('/transcribe', upload.single('audio'), async (req, res) => {
   try {
+    const context = getRequestContext(req.body);
+
     if (req.body?.text) {
       const transcript = String(req.body.text).trim();
-      const payload = await buildTranscribeResponse(transcript);
+      const payload = await buildTranscribeResponse(transcript, context);
       res.json(payload);
       return;
     }
 
     if (req.body?.audio) {
-      const transcript = await transcribeBase64PcmAudio(req.body.audio);
+      const transcript = await transcribeBase64PcmAudio(
+        req.body.audio,
+        'aurel-recording.wav',
+        context.language
+      );
 
       if (!transcript) {
         res.status(422).json({ error: 'No transcript returned from audio.' });
         return;
       }
 
-      const payload = await buildTranscribeResponse(transcript);
+      const payload = await buildTranscribeResponse(transcript, context);
       res.json(payload);
       return;
     }
@@ -289,7 +321,8 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
 
     const transcript = await transcribeAudioBuffer(
       req.file.buffer,
-      req.file.originalname || 'aurel-recording.m4a'
+      req.file.originalname || 'aurel-recording.m4a',
+      context.language
     );
 
     if (!transcript) {
@@ -297,7 +330,7 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
       return;
     }
 
-    const payload = await buildTranscribeResponse(transcript);
+    const payload = await buildTranscribeResponse(transcript, context);
     res.json(payload);
   } catch (error) {
     console.error('Transcription error:', error);
@@ -307,12 +340,18 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
 
 app.post('/transcribe-wake', async (req, res) => {
   try {
+    const context = getRequestContext(req.body);
+
     if (!req.body?.audio) {
       res.status(400).json({ error: 'Audio is required.' });
       return;
     }
 
-    const transcript = await transcribeBase64PcmAudio(req.body.audio, 'aurel-wake.wav');
+    const transcript = await transcribeBase64PcmAudio(
+      req.body.audio,
+      'aurel-wake.wav',
+      context.language
+    );
 
     res.json({ transcript });
   } catch (error) {
@@ -323,6 +362,7 @@ app.post('/transcribe-wake', async (req, res) => {
 
 app.post('/speak', async (req, res) => {
   try {
+    const context = getRequestContext(req.body);
     const text = String(req.body?.text || '').trim();
 
     if (!text) {
@@ -330,7 +370,7 @@ app.post('/speak', async (req, res) => {
       return;
     }
 
-    const audio = await getTextToSpeechAudio(text);
+    const audio = await getTextToSpeechAudio(text, context.language);
     res.json({
       audio,
       audioFormat: 'mp3',
@@ -350,11 +390,11 @@ function sendJson(ws, payload) {
   }
 }
 
-async function getClaudeSpeechEngineResponse(transcript) {
+async function getClaudeSpeechEngineResponse(transcript, context = {}) {
   const stream = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 256,
-    system: SPEECH_ENGINE_SYSTEM_PROMPT,
+    system: buildSystemPrompt(SPEECH_ENGINE_SYSTEM_PROMPT, context.username),
     messages: [{ role: 'user', content: transcript }],
     stream: true,
   });
@@ -369,8 +409,8 @@ async function getClaudeSpeechEngineResponse(transcript) {
   return response.trim();
 }
 
-async function streamTextToSpeechToMobile(mobileWs, responseText) {
-  const audioBuffer = await getTextToSpeechBuffer(responseText);
+async function streamTextToSpeechToMobile(mobileWs, responseText, context = {}) {
+  const audioBuffer = await getTextToSpeechBuffer(responseText, context.language);
 
   sendJson(mobileWs, { type: 'audio.start', audioFormat: 'mp3' });
 
@@ -381,7 +421,7 @@ async function streamTextToSpeechToMobile(mobileWs, responseText) {
   sendJson(mobileWs, { type: 'audio.complete', audioFormat: 'mp3' });
 }
 
-async function handleSpeechEngineTranscript(mobileWs, transcript) {
+async function handleSpeechEngineTranscript(mobileWs, transcript, context = {}) {
   if (!transcript) {
     return;
   }
@@ -389,9 +429,9 @@ async function handleSpeechEngineTranscript(mobileWs, transcript) {
   sendJson(mobileWs, { type: 'transcript', transcript });
 
   try {
-    const response = await getClaudeSpeechEngineResponse(transcript);
+    const response = await getClaudeSpeechEngineResponse(transcript, context);
     sendJson(mobileWs, { type: 'response', response });
-    await streamTextToSpeechToMobile(mobileWs, response);
+    await streamTextToSpeechToMobile(mobileWs, response, context);
   } catch (error) {
     console.error('Speech Engine Claude/TTS error:', error);
     sendJson(mobileWs, { type: 'error', message: 'Failed to generate voice response.' });
@@ -405,14 +445,20 @@ wss.on('connection', async (ws) => {
   ws.on('message', async (message, isBinary) => {
     try {
       let transcript = '';
+      let context = getRequestContext();
 
       if (isBinary) {
         transcript = await transcribePcmBuffer(Buffer.from(message));
       } else {
         const payload = JSON.parse(message.toString());
+        context = getRequestContext(payload);
 
         if (payload.type === 'audio' && payload.audio) {
-          transcript = await transcribeBase64PcmAudio(payload.audio, 'aurel-ws.wav');
+          transcript = await transcribeBase64PcmAudio(
+            payload.audio,
+            'aurel-ws.wav',
+            context.language
+          );
         } else if (payload.type === 'text' && payload.text) {
           transcript = String(payload.text).trim();
         } else {
@@ -421,7 +467,7 @@ wss.on('connection', async (ws) => {
         }
       }
 
-      await handleSpeechEngineTranscript(ws, transcript);
+      await handleSpeechEngineTranscript(ws, transcript, context);
     } catch (error) {
       console.error('OpenAI WebSocket transcription error:', error);
       sendJson(ws, { type: 'error', message: 'Failed to process audio.' });
