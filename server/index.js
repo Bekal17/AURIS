@@ -193,7 +193,8 @@ async function getTextToSpeechAudio(responseText, language = 'id') {
 
 function getSpeakTextFromClaudeResponse(responseText) {
   try {
-    const intent = JSON.parse(responseText);
+    const cleaned = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const intent = JSON.parse(cleaned);
     if (typeof intent?.speak === 'string' && intent.speak.trim()) {
       return intent.speak.trim();
     }
@@ -242,7 +243,7 @@ async function transcribeAudioBuffer(audioBuffer, filename = 'aurel-recording.wa
     const transcription = await openai.audio.transcriptions.create({
       file: createReadStream(tempPath),
       model: 'whisper-1',
-      language: normalizeLanguage(language),
+      language: 'id',
     });
 
     return String(transcription.text || '').trim();
