@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { TextToSpeechClient } from '@google-cloud/text-to-speech';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -15,7 +16,6 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const OPENAI_TTS_VOICE = 'shimmer';
 const AUREL_SYSTEM_PROMPT = `Kamu adalah Aurel, asisten suara hands-free untuk pengemudi, orang sibuk, dan penyandang disabilitas.
 Deteksi bahasa user dan balas dalam bahasa yang sama.
 
@@ -100,6 +100,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const textToSpeechClient = new TextToSpeechClient({
+  credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => {
@@ -155,10 +159,6 @@ function buildSystemPrompt(basePrompt, username) {
   return `${basePrompt}\nPanggil user dengan nama ${username}.`;
 }
 
-function getTtsVoice(language) {
-  return language === 'en' ? OPENAI_TTS_VOICE : OPENAI_TTS_VOICE;
-}
-
 async function getClaudeResponse(transcript, context = {}) {
   const message = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -180,17 +180,14 @@ async function streamToBuffer(stream) {
   return Buffer.concat(chunks);
 }
 
-async function getTextToSpeechAudio(responseText, language = 'id') {
-  const audioResponse = await openai.audio.speech.create({
-    model: 'tts-1',
-    voice: getTtsVoice(language),
-    input: responseText,
-    response_format: 'mp3',
-    speed: 1.0,
+async function synthesizeSpeech(text) {
+  const [response] = await textToSpeechClient.synthesizeSpeech({
+    input: { text },
+    voice: { languageCode: 'id-ID', name: 'id-ID-Wavenet-B' },
+    audioConfig: { audioEncoding: 'MP3' },
   });
-  const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
 
-  return audioBuffer.toString('base64');
+  return response.audioContent.toString('base64');
 }
 
 function getSpeakTextFromClaudeResponse(responseText) {
@@ -264,22 +261,10 @@ async function transcribePcmBuffer(audioBuffer, filename = 'aurel-ws.wav', langu
   return transcribeAudioBuffer(wavAudio, filename, language);
 }
 
-async function getTextToSpeechBuffer(responseText, language = 'id') {
-  const audioResponse = await openai.audio.speech.create({
-    model: 'tts-1',
-    voice: getTtsVoice(language),
-    input: responseText,
-    response_format: 'mp3',
-    speed: 1.0,
-  });
-
-  return Buffer.from(await audioResponse.arrayBuffer());
-}
-
 async function buildTranscribeResponse(transcript, context = {}) {
   const response = await getClaudeResponse(transcript, context);
   const speak = getSpeakTextFromClaudeResponse(response);
-  const audio = await getTextToSpeechAudio(speak, context.language);
+  const audio = await synthesizeSpeech(speak);
 
   return {
     transcript,
@@ -386,7 +371,7 @@ app.post('/speak', async (req, res) => {
       return;
     }
 
-    const audio = await getTextToSpeechAudio(text, context.language);
+    const audio = await synthesizeSpeech(text);
     res.json({
       audio,
       audioFormat: 'mp3',
@@ -426,7 +411,8 @@ async function getClaudeSpeechEngineResponse(transcript, context = {}) {
 }
 
 async function streamTextToSpeechToMobile(mobileWs, responseText, context = {}) {
-  const audioBuffer = await getTextToSpeechBuffer(responseText, context.language);
+  const audio = await synthesizeSpeech(responseText);
+  const audioBuffer = Buffer.from(audio, 'base64');
 
   sendJson(mobileWs, { type: 'audio.start', audioFormat: 'mp3' });
 
