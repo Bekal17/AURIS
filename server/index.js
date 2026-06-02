@@ -310,6 +310,12 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
         return;
       }
 
+      const GARBAGE_PATTERNS = ['sama-sama', 'sama sama', 'terima kasih', 'aku adalah', 'saya adalah', 'i am', 'thank you', 'thanks', 'you\'re welcome'];
+      const lowerTranscript = transcript.toLowerCase().trim();
+      if (lowerTranscript.length < 4 || GARBAGE_PATTERNS.some(p => lowerTranscript.includes(p))) {
+        return res.json({ transcript: '', response: '', audio: '' });
+      }
+
       const payload = await buildTranscribeResponse(transcript, context);
       res.json(payload);
       return;
@@ -329,6 +335,12 @@ app.post('/transcribe', upload.single('audio'), async (req, res) => {
     if (isEmptyWhisperTranscript(transcript)) {
       res.json(buildEmptyTranscribeResponse());
       return;
+    }
+
+    const GARBAGE_PATTERNS = ['sama-sama', 'sama sama', 'terima kasih', 'aku adalah', 'saya adalah', 'i am', 'thank you', 'thanks', 'you\'re welcome'];
+    const lowerTranscript = transcript.toLowerCase().trim();
+    if (lowerTranscript.length < 4 || GARBAGE_PATTERNS.some(p => lowerTranscript.includes(p))) {
+      return res.json({ transcript: '', response: '', audio: '' });
     }
 
     const payload = await buildTranscribeResponse(transcript, context);
