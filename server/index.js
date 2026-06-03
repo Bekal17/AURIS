@@ -183,7 +183,7 @@ async function streamToBuffer(stream) {
 async function synthesizeSpeech(text) {
   const [response] = await textToSpeechClient.synthesizeSpeech({
     input: { text },
-    voice: { languageCode: 'id-ID', name: 'id-ID-Wavenet-B' },
+    voice: { languageCode: 'id-ID', name: 'id-ID-Wavenet-A' },
     audioConfig: { audioEncoding: 'MP3' },
   });
 
